@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+reports/
+.discovery-tests-root/
+.pytest-*/
+.review-pytest-*/
+*.visual-check.json

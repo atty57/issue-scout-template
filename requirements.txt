@@ -1,0 +1,5 @@
+langgraph>=1.2
+langchain-groq>=1.1
+langsmith>=0.4
+requests>=2.32
+packaging>=24.0

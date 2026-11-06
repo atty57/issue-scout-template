@@ -1,0 +1,4 @@
+# Test-only. The daily workflow installs requirements.txt alone.
+pytest>=8.3
+# Shuffles test order every run, so a test that only passes in file order fails loudly.
+pytest-randomly>=5.0

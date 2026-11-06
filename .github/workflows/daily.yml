@@ -1,0 +1,57 @@
+name: issue-scout
+
+on:
+  schedule:
+    - cron: "30 15 * * *"   # 11:30 ET in summer, 10:30 in winter; GitHub may start scheduled runs a bit late
+  workflow_dispatch:
+
+permissions:
+  contents: write   # commit state/seen.json
+
+concurrency: scout
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free runner disk space
+        run: |
+          df -h /
+          # Validation SDKs live in Docker; these host SDKs are unused by the scout.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/swift
+          docker image prune --all --force
+          df -h /
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install --no-cache-dir -r requirements.txt && npm install -g @anthropic-ai/claude-code && npm cache clean --force
+      - run: python -u scout.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+      - name: Upload scout report and patch
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: scout-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            reports/report.txt
+            reports/change.patch
+            reports/notification.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Remember discovery progress and picked issues
+        if: ${{ always() }}
+        run: |
+          git config user.name "issue-scout"
+          git config user.email "issue-scout@users.noreply.github.com"
+          for state_file in state/seen.json state/discovery.json; do
+            [ ! -f "$state_file" ] || git add -- "$state_file"
+          done
+          git diff --cached --quiet || { git commit -m "scout: remember discovery progress and picked issues" && git push; }
