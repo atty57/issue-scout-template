@@ -116,8 +116,6 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q -p no:cacheprovider
 ```
 
-Contributor and coding-agent guidance is in [AGENTS.md](AGENTS.md).
-
 ## License
 
 [MIT](LICENSE). Maintained by [@atty57](https://github.com/atty57).
