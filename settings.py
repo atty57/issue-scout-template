@@ -6,18 +6,23 @@ from datetime import timedelta
 from pathlib import Path
 
 from workloads import LANGUAGE_RUNTIMES, canonical_language
+from provider_config import SECRET_NAMES, load_provider
 
 ROOT = Path(__file__).parent
-PROFILE = json.loads((ROOT / "profile.json").read_text())
+PROFILE_PATH = Path(os.environ.get("SCOUT_PROFILE", ROOT / "profile.json"))
+if not PROFILE_PATH.is_absolute():
+    PROFILE_PATH = ROOT / PROFILE_PATH
+PROFILE = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 SEEN = ROOT / "state" / "seen.json"
 REPORTS = ROOT / "reports"
 GITHUB = "https://github.com"
-MODEL = os.environ.get("SCOUT_MODEL", "openai/gpt-oss-120b")
+PICKER = load_provider("picker")
+SOLVER = load_provider("solver")
+MODEL = PICKER.model
 MAX_FIXES = 2
 PACE = 2  # seconds between search calls
-SECRETS = ("CLAUDE_CODE_OAUTH_TOKEN", "GROQ_API_KEY", "GMAIL_APP_PASSWORD", "GH_TOKEN", "LANGSMITH_API_KEY")
+SECRETS = SECRET_NAMES
 AGENT_KEEPS = ("CLAUDE_CODE_OAUTH_TOKEN",)  # the only secret the agent's own process needs
-REQUIRED = ("CLAUDE_CODE_OAUTH_TOKEN", "GROQ_API_KEY", "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD")
 
 DEFAULTS = {
     "updated_days": 30, "search_pages": 2, "candidate_limit": 30, "shortlist_size": 5,
@@ -26,6 +31,9 @@ DEFAULTS = {
     "general_issues": False, "min_stars": 200,
     "exclude_labels": ["good first issue"],
 }
+PROFILE_FIELDS = {"setup_required", "email", "summary", "skills", "skill_aliases", "languages", "work_types",
+                  "labels", "documentation_labels", "watchlist", "merged_in", "days", "scouting"}
+REQUIRED_FIELDS = ("days", "labels", "languages", "merged_in", "skills", "watchlist")  # read as PROFILE[...]
 POSITIVE_INTEGERS = ("updated_days", "search_pages", "candidate_limit", "shortlist_size", "max_comment_pages",
                      "max_timeline_pages", "claim_days", "retry_days", "max_attempts", "min_stars")
 
@@ -48,6 +56,8 @@ def load_settings(profile):
     """Merge the profile's scouting overrides onto the defaults, rejecting unusable values."""
     if not isinstance(profile, dict):
         raise ValueError("profile must be an object")
+    if unknown := sorted(profile.keys() - PROFILE_FIELDS):
+        raise ValueError(f"unknown profile fields: {', '.join(unknown)}")
     if not isinstance(profile.get("scouting", {}), dict):
         raise ValueError("scouting must be an object")
     if "days" in profile and (type(profile["days"]) is not int or not 1 <= profile["days"] <= timedelta.max.days):
@@ -77,6 +87,12 @@ def load_settings(profile):
     return settings
 
 
+def require_fields(profile):
+    """Fail at startup, not mid-run after paid calls, when the profile omits a field the engine reads."""
+    if missing := [name for name in REQUIRED_FIELDS if name not in profile]:
+        raise ValueError(f"missing profile fields: {', '.join(missing)}")
+
+
 def load_workloads(profile):
     """-> (languages, work_types), rejecting anything the validation harness cannot run."""
     if not isinstance(profile, dict):
@@ -91,4 +107,5 @@ def load_workloads(profile):
 
 
 SCOUT = load_settings(PROFILE)
+require_fields(PROFILE)
 LANGUAGES, WORK_TYPES = load_workloads(PROFILE)

@@ -5,9 +5,15 @@ from redaction import scrub
 from settings import LANGUAGES, PROFILE, SCOUT, WORK_TYPES
 
 
+def profile_summary():
+    """The profile's own summary, or one built from its skills when setup left it blank."""
+    return (PROFILE.get("summary", "").strip()
+            or f"A developer interested in {', '.join(PROFILE['skills']) or 'any suitable topic'}.")
+
+
 def picker_prompt(listing):
     return (
-        f"Developer profile: {PROFILE['summary']}\n\n"
+        f"Developer profile: {profile_summary()}\n\n"
         f"Enabled languages: {', '.join(sorted(LANGUAGES))}; work types: {', '.join(sorted(WORK_TYPES))}.\n"
         "Goal: select the strongest suitable issue for one focused code or documentation contribution. "
         "Evaluate EVERY candidate independently against these requirements before comparing them.\n\n"

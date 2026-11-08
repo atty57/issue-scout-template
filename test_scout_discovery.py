@@ -49,9 +49,8 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(scout.http, "get", Mock(side_effect=AssertionError("unexpected network call")))
     monkeypatch.setattr(scout.time, "sleep", Mock())
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
-    monkeypatch.setenv("GMAIL_ADDRESS", "scout@example.com")
-    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", Mock(side_effect=AssertionError("unexpected email send")))
+    monkeypatch.setenv("SCOUT_RECIPIENT_EMAIL", "scout@example.com")
+    monkeypatch.delenv("SCOUT_EMAIL_RELAY_URL", raising=False)
 
 
 def test_failed_search_keeps_previous_results_and_continues_other_queries(monkeypatch):

@@ -1,0 +1,14 @@
+{
+  "email": "",
+  "summary": "A developer interested in Python libraries, typed APIs, and clear documentation.",
+  "skills": ["pydantic", "async", "agent", "retriev", "rag", "embedding", "llm"],
+  "skill_aliases": {},
+  "languages": ["python", "javascript", "typescript", "C#", "c"],
+  "work_types": ["code", "documentation"],
+  "labels": ["bug", "help wanted"],
+  "documentation_labels": ["documentation", "docs"],
+  "watchlist": ["example/project"],
+  "merged_in": [],
+  "days": 3,
+  "scouting": {"general_issues": true}
+}

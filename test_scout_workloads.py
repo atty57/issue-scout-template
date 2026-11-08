@@ -17,7 +17,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(scout, "SEEN", tmp_path / "seen.json")
     monkeypatch.setattr(scout, "REPORTS", tmp_path / "reports")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
-    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
+    monkeypatch.delenv("SCOUT_EMAIL_RELAY_URL", raising=False)
 
 
 def plan(runtime="node24", **changes):

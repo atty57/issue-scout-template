@@ -1,4 +1,12 @@
 __pycache__/
+.venv/
+.env
+.env.*
+!.env.example
+!.env.relay.example
+*.local.json
+.codex/
+.claude/
 .pytest_cache/
 reports/
 .discovery-tests-root/

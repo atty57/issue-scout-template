@@ -7,6 +7,8 @@ import io
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -14,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch as mock_patch
 
 import email_html
+import prompts
 import scout
 import settings
 
@@ -76,16 +79,15 @@ def test_redact_every_secret_and_its_rewrites():
 
 def test_workflow_passes_no_secret_redact_has_never_heard_of():
     workflow = (scout.ROOT / ".github" / "workflows" / "daily.yml").read_text()
-    passed = set(re.findall(r"^\s+([A-Z][A-Z_]+):\s*\$\{\{", workflow, re.M))
+    passed = set(re.findall(r"^\s+([A-Z][A-Z_]+):\s*\$\{\{\s*(?:secrets\.|github\.token)", workflow, re.M))
     assert passed, "no env block found; the regex or the workflow moved"
-    not_a_credential = {"GMAIL_ADDRESS"}  # my own inbox: it is the To: line, there is nothing to redact
-    assert passed <= set(scout.SECRETS) | not_a_credential, passed - set(scout.SECRETS)
+    assert passed <= set(scout.SECRETS), passed - set(scout.SECRETS)
 
 
 def test_scan_secrets_catches_shapes_and_leaves_our_own_files_alone():
     leaks = ["ghp_" + "a" * 36, "sk-ant-api03-" + "x" * 40, "gsk_" + "b" * 52, "xoxb-123456789012-abcdef",
              "AKIA" + "Z" * 16, "-----BEGIN RSA PRIVATE KEY-----", "Authorization: Bearer " + "c" * 40,
-             'API_KEY = "' + "d" * 24 + '"', "GMAIL_APP_PASSWORD=abcd efgh ijkl mnop"]
+             'API_KEY = "' + "d" * 24 + '"', "MAIL_PASSWORD=abcd efgh ijkl mnop"]
     for leak in leaks:
         assert scout.scan_secrets(f"diff --git a/x b/x\n+{leak}\n"), leak
     clean = [(scout.ROOT / "README.md").read_text(), (scout.ROOT / "scout.py").read_text(),
@@ -262,7 +264,7 @@ def test_pipeline_end_to_end():
         return passed, scout.TEST_PHASE + "\n" + ("" if passed else "SCOUT_REGRESSION:1\n") + log
 
     out = io.StringIO()
-    with env({"GROQ_API_KEY": "sekret-1234567890", "GMAIL_APP_PASSWORD": None, "LANGSMITH_TRACING": "false"}), \
+    with env({"GROQ_API_KEY": "sekret-1234567890", "SCOUT_EMAIL_RELAY_URL": None, "LANGSMITH_TRACING": "false"}), \
             mock_patch.multiple(scout, gh=fake_gh, gh_file=fake_file, llm=FakeLLM, claude=fake_claude,
                            run_validation=fake_run_validation, GITHUB=f"file://{tmp}", SEEN=tmp / "state" / "seen.json",
                            REPORTS=tmp / "reports"), \
@@ -309,6 +311,29 @@ def test_html_part_is_dropped_when_anything_credential_shaped_survives(monkeypat
     msg, body, _ = scout.compose(_mail_state(pr_body="ghp_" + "a" * 36))
     assert msg.get_body(preferencelist=("html",)) is None       # fail closed: text-only
     assert "ghp_" + "a" * 36 not in msg.as_string()
+
+def test_unconfigured_template_stops_before_any_provider_or_email_check():
+    # No credentials and a key-requiring picker: if the guard is missing or late, the provider check fails instead.
+    environment = {name: value for name, value in os.environ.items()
+                   if name not in settings.SECRETS and not name.startswith("SCOUT_")}
+    environment |= {"SCOUT_PROFILE": "profile.json", "SCOUT_PICKER_PROVIDER": "groq"}
+    run = subprocess.run([sys.executable, "scout.py"], cwd=settings.ROOT, env=environment,
+                         capture_output=True, text=True, timeout=120)
+    output = run.stdout + run.stderr
+    assert run.returncode != 0
+    assert "SETUP_REQUIRED" in output
+    assert "GROQ_API_KEY" not in output and "Traceback" not in output
+
+
+@pytest.mark.parametrize("skills, summary", [
+    (["pydantic", "rag"], "A developer interested in pydantic, rag."),
+    ([], "A developer interested in any suitable topic."),
+])
+def test_blank_summary_is_replaced_with_one_built_from_the_profile(monkeypatch, skills, summary):
+    monkeypatch.setitem(prompts.PROFILE, "summary", "  ")
+    monkeypatch.setitem(prompts.PROFILE, "skills", skills)
+    assert f"Developer profile: {summary}\n" in prompts.picker_prompt([])
+
 
 if __name__ == "__main__":
     test_claim_regex()

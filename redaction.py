@@ -20,11 +20,12 @@ def forms(value):
 
 
 def redact(text):
-    for name in SECRETS:
-        value = os.environ.get(name)
-        if value and len(value) >= 12:  # ponytail: a shorter value isn't a token, and replacing it would eat the text
-            for form in forms(value):
-                text = text.replace(form, "[redacted]")
+    values = {form for name in SECRETS if (value := os.environ.get(name)) and len(value) >= 12
+              for form in forms(value)}
+    # A provider key may be a prefix of another credential. Replace longer values
+    # first so no suffix survives after the shorter credential has been removed.
+    for value in sorted(values, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
     return text
 
 
@@ -34,7 +35,8 @@ LEAK_PATTERNS = {
     "github token": r"gh[pousr]_[A-Za-z0-9]{20,}",
     "anthropic key": r"sk-ant-[A-Za-z0-9_-]{20,}",
     "groq key": r"gsk_[A-Za-z0-9]{20,}",
-    "openai key": r"sk-[A-Za-z0-9]{32,}",
+    "resend key": r"\bre_[A-Za-z0-9_-]{20,}",
+    "openai key": r"sk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}",
     "slack token": r"xox[baprs]-[A-Za-z0-9-]{10,}",
     "aws key id": r"AKIA[0-9A-Z]{16}",
     "private key": r"-----BEGIN [A-Z ]*PRIVATE KEY-----",

@@ -1,7 +1,9 @@
 """Configuration boundaries for discovery, without network calls."""
+import json
+
 import pytest
 
-from settings import load_settings, load_workloads
+from settings import ROOT, load_settings, load_workloads, require_fields
 
 
 @pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "3", None, 1_000_000_000])
@@ -85,6 +87,20 @@ def test_discovery_settings_reject_malformed_profile_objects(profile):
 def test_discovery_workload_configuration_rejects_malformed_lists(profile):
     with pytest.raises(ValueError, match="languages|work_types"):
         load_workloads(profile)
+
+
+@pytest.mark.parametrize("field", ["langauges", "skils", "Email"])
+def test_profile_rejects_unknown_fields_instead_of_ignoring_typos(field):
+    with pytest.raises(ValueError, match=field):
+        load_settings({field: ["python"]})
+
+
+@pytest.mark.parametrize("field", ["days", "labels", "languages", "merged_in", "skills", "watchlist"])
+def test_profile_must_name_every_field_the_engine_reads(field):
+    profile = json.loads((ROOT / "profile.example.json").read_text(encoding="utf-8"))
+    del profile[field]
+    with pytest.raises(ValueError, match=f"missing profile fields: {field}$"):
+        require_fields(profile)
 
 
 def test_discovery_allows_documentation_only_and_canonical_language_aliases():

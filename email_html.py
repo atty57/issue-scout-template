@@ -84,9 +84,11 @@ def render(state, score):
         b = r["brief"]
         check = "Checks" if kind == "documentation" else "Tests"
         proof = "n/a" if kind == "documentation" else ("yes" if r.get("reproduces") else "not shown")
+        cost = r.get("cost")
+        cost_text = f"${cost:.2f}" if isinstance(cost, (int, float)) else "n/a"
         stats = (_stat(check, "pass" if r["passed"] else "FAIL", YELLOW if r["passed"] else RED)
                  + _stat("Fails unfixed", proof, VIOLET) + _stat("Score", score, WHITE)
-                 + _stat("Claude est.", f"${r.get('cost', 0.0):.2f}", CREAM, last=True))
+                 + _stat("Usage est.", cost_text, CREAM, last=True))
         policy = f"AI policy: {pol['status']}" + (f' &mdash; &ldquo;{_t(pol["quote"])}&rdquo;' if pol.get("quote") else "")
         sections = "".join([
             _section("1) Claim it: comment on the issue", f'<div style="{MONO}">{_t(b["claim_comment"])}</div>', head=RED),

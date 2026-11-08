@@ -537,8 +537,7 @@ def test_notify_persists_outcome_and_migrates_legacy_history(monkeypatch, capsys
     issue = picker_option()
     legacy_url = "https://github.com/acme/core/issues/999"
     scout.SEEN.write_text(json.dumps([legacy_url]))
-    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", Mock(side_effect=AssertionError("unexpected email send")))
+    monkeypatch.delenv("SCOUT_EMAIL_RELAY_URL", raising=False)
     brief = {key: "review detail" for key in scout.BRIEF_SCHEMA["required"]}
     brief.update(maintainer_questions=["Confirmed expected behavior"], checklist=["Review patch"])
     result = {"brief": brief, "patch": "+return validated_value\n", "passed": True, "reproduces": True, "cost": 0, "log": ""} if successful else {"error": "clone failed"}

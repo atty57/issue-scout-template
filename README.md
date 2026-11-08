@@ -2,7 +2,9 @@
 
 Find a GitHub issue, draft a validated fix, and email a patch for human review.
 
-issue-scout searches for focused open-source contributions that fit your profile. It selects at most one issue per run, uses Claude Code to draft a code or documentation change, validates it, and emails you the patch with a review brief. You claim the issue, review the work, and submit the pull request yourself.
+issue-scout searches for focused open-source contributions that fit your profile. It selects at most one issue per run, uses your chosen model provider to draft a code or documentation change, validates it, and emails you the patch with a review brief. You claim the issue, review the work, and submit the pull request yourself.
+
+Picker and solver providers are independent: use Claude Code or Codex with their supported CLI login, or bring API keys for Anthropic, OpenAI, Groq, or an OpenAI-compatible endpoint. The defaults remain Groq for selection and Claude Code for solving. See [provider configuration](docs/providers.md) for setup and subscription limitations.
 
 Supported code workloads are Python, C, C#, JavaScript and TypeScript. Documentation-only issues can qualify independently of a repository's code language. AI/ML experience improves ranking without restricting eligibility to that topic.
 
@@ -25,7 +27,7 @@ Supported code workloads are Python, C, C#, JavaScript and TypeScript. Documenta
 
 The project makes regular open-source contributions easier by handling issue discovery, suitability checks and an initial fix before human review. Availability checks and repository AI policies help avoid claiming someone else's work or preparing an unsuitable contribution.
 
-[LangGraph](https://github.com/langchain-ai/langgraph) coordinates the workflow, Groq handles issue and policy evaluation, Claude Code writes changes using your subscription, and Docker isolates repository setup and tests. Gmail delivers the result; optional LangSmith tracing helps inspect a run.
+[LangGraph](https://github.com/langchain-ai/langgraph) coordinates the workflow. Configurable picker and solver providers handle evaluation and editing; Docker isolates repository setup and tests. A Resend relay delivers drafts from `noreply@scouts.email`; users supply only their destination email. Optional LangSmith tracing helps inspect a run.
 
 ## Install
 
@@ -34,10 +36,10 @@ The project makes regular open-source contributions easier by handling issue dis
 The GitHub Actions workflow installs the scout on Ubuntu with Python 3.12. For a full local run, prepare:
 
 - Python 3.12 and pip.
-- Git, Node.js and npm; npm installs the Claude Code CLI.
+- Git; Node.js and npm if using a CLI backend.
 - Docker with a running daemon and Linux-container support for code validation and optional documentation builds.
-- A Claude Pro or Max subscription and a Groq API key.
-- A Gmail account with an app password if you want email delivery.
+- Credentials for your chosen providers. Subscription use requires the corresponding official CLI login; API use requires your own key.
+- Your destination email if you want email delivery through the configured service.
 
 Use a Linux environment, such as Ubuntu or WSL, for the local commands below.
 
@@ -48,7 +50,9 @@ python -m pip install -r requirements.txt
 npm install -g @anthropic-ai/claude-code
 ```
 
-For GitHub Actions, fork the repository or push a copy to your own repository; the workflow installs its dependencies automatically.
+Personalize `profile.json` before running, then delete its `"setup_required": true` line; until then Scout stops with `SETUP_REQUIRED` before making any calls. [profile.example.json](profile.example.json) shows a filled-in profile. Unknown fields are rejected, and a blank `summary` is generated from your skills. Alternatively, point `SCOUT_PROFILE` at another complete profile. For API-only backends, skip the npm installation; for Codex, install `@openai/codex` instead. See [provider configuration](docs/providers.md).
+
+For GitHub Actions, copy the repository into your own account; the workflow installs dependencies and only the selected CLIs automatically.
 
 ### Credentials
 
@@ -56,25 +60,41 @@ Add these as repository secrets under **Settings → Secrets and variables → A
 
 | Name | Purpose |
 |---|---|
-| `CLAUDE_CODE_OAUTH_TOKEN` | Required for solving. Run `claude setup-token` locally with your Pro or Max subscription and use the generated token. No Anthropic API key is needed. |
-| `GROQ_API_KEY` | Required for model evaluation. Obtain a key from [Groq Console](https://console.groq.com). |
-| `GMAIL_ADDRESS` | Sender and recipient address. Required for emailed runs and by the CI credential check. |
-| `GMAIL_APP_PASSWORD` | Gmail app password, with 2-Step Verification enabled. Required in CI; omit locally to print the email without sending it. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | For Claude Code subscription authentication in your own workflow. Local runs can use the CLI's saved login. |
+| `GROQ_API_KEY` | Required only when Groq is selected. Obtain a key from [Groq Console](https://console.groq.com). |
+| `ANTHROPIC_API_KEY` | For the Anthropic API backend or Claude Code with API-key authentication. |
+| `OPENAI_API_KEY` / `CODEX_API_KEY` | For OpenAI API / Codex API-key authentication respectively. Codex subscription runs use its saved official CLI login. |
+| `SCOUT_API_KEY` | Key for a custom OpenAI-compatible endpoint. |
+| `SCOUT_PICKER_API_KEY` / `SCOUT_SOLVER_API_KEY` | Optional independent API keys; override the selected provider's usual key for that stage. |
 | `LANGSMITH_API_KEY` | Optional tracing key from [LangSmith](https://smith.langchain.com). Adding this key enables tracing. |
 | `GH_TOKEN` | The workflow uses the built-in `github.token`. For local authenticated requests or a workflow search returning 403, use a fine-grained, read-only personal access token. If stored as a secret, update the workflow's `GH_TOKEN` mapping to use it. |
 
 For an EU-hosted LangSmith workspace, also set `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com` in your local environment or the workflow's environment block.
+
+For email, add `"email": "you@example.com"` to your profile, or set the repository Variable `SCOUT_RECIPIENT_EMAIL`. Users do not provide a mail password or a Resend key. The domain owner configures and hosts the sending relay separately; see [email delivery setup](docs/email-delivery.md).
 
 ## Usage
 
 ### GitHub Actions
 
 1. Configure the [credentials](#credentials) in your repository.
-2. Edit [profile.json](profile.json) with your experience, skills, watchlist and scouting preferences.
+2. Edit [profile.json](profile.json) with your experience, skills, watchlist and scouting preferences, and remove `"setup_required": true`.
 3. Open **Actions → issue-scout → Run workflow** to run it manually.
 4. Review the email or download the run's report artifact. Claim the selected issue before preparing your pull request.
 
-The [daily workflow](.github/workflows/daily.yml) is scheduled at **15:30 UTC**: 11:30 a.m. Eastern during daylight saving time and 10:30 a.m. during standard time. GitHub may start scheduled runs late. The workflow commits updated issue history to `state/seen.json` and retry-scan progress to `state/discovery.json` in your own repository.
+#### Schedule
+
+The [workflow](.github/workflows/daily.yml) runs only when started manually. To run it daily, add a `schedule` under `on:` with your start time and [IANA time zone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones); GitHub handles daylight saving time:
+
+```yaml
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * *"             # Scout starts at 09:00 every day
+      timezone: "America/New_York"   # keep this nested under the cron line
+```
+
+GitHub may start scheduled runs late during busy periods, and the email arrives after the run finishes. The workflow commits updated issue history to `state/seen.json` and retry-scan progress to `state/discovery.json` in your own repository.
 
 ### CLI
 
@@ -84,13 +104,13 @@ After setting your credentials and editing the profile, run:
 python -u scout.py
 ```
 
-To preview the notification locally, leave `GMAIL_APP_PASSWORD` unset. The scout saves the report and prints the email without sending it. This still runs discovery, model calls and any selected solve and validation steps; it is not an offline test.
+When no destination email or relay URL is configured, Scout saves the report and prints an email preview. The shared relay currently authenticates GitHub Actions workflows; local runs with a configured relay preserve their reports if workflow identity is unavailable. Discovery, model calls and solve/validation still run; preview mode is not an offline test.
 
 A run can end without selecting an issue when the candidate pool is exhausted or evidence is insufficient.
 
 ### Tracing
 
-Set `LANGSMITH_API_KEY` to trace the graph and its nodes, Groq calls, each `claude -p` turn with its brief and cost, and sandbox test runs. Secrets are scrubbed before upload. The default tracing project is `issue-scout`.
+Set `LANGSMITH_API_KEY` to trace the graph, picker calls, solver turns, and sandbox test runs. Secrets are scrubbed before upload. The default tracing project is `issue-scout`.
 
 ## Configuration
 
@@ -99,6 +119,7 @@ Edit [profile.json](profile.json) to personalize discovery and ranking.
 | Field | What it controls |
 |---|---|
 | `summary`, `skills`, `skill_aliases` | Your experience and matching terms. Aliases support variants such as `retrieval` and `retrievers`; word boundaries prevent `rag` from matching `storage`. |
+| `email` | Destination for your draft. The verified sender is managed by the domain owner. |
 | `languages` | Enabled code ecosystems. |
 | `work_types` | `code`, `documentation`, or both. |
 | `labels`, `documentation_labels` | Code search labels and language-independent documentation search labels. |
@@ -174,7 +195,7 @@ Accuracy still needs human review. Remote links, anchors, generated routes and r
 
 ### Email and Saved Files
 
-The email includes the claim comment, root cause, approach, risks, unverified behavior, reviewer questions, pre-PR checklist and commit/PR details. Its HTML alternative highlights the issue, selection rationale, validation status and estimated Claude cost. Issue and brief text are HTML-escaped, and the claim link accepts only HTTPS URLs.
+The email includes the claim comment, root cause, approach, risks, unverified behavior, reviewer questions, pre-PR checklist and commit/PR details. Its HTML alternative highlights the issue, selection rationale, validation status and reported usage cost. Providers without a dollar estimate display `n/a`; this does not mean usage is free. Issue and brief text are HTML-escaped, and the claim link accepts only HTTPS URLs.
 
 Plain text remains the canonical report and includes validation and regression logs. Every selected issue saves these files before connecting to Gmail:
 
@@ -190,7 +211,7 @@ There is no separate HTML artifact. Local `reports/` files are ignored by Git.
 
 ### Delivery Failures and Retry History
 
-SMTP uses verified TLS with a 30-second timeout and up to three fresh connections, waiting 2 and 4 seconds between transient failures. Permanent authentication or recipient errors stop immediately. A disconnect during cleanup after message acceptance does not resend the email.
+Delivery uses an HTTPS relay backed by Resend. The client retries transient failures up to three times, waiting 2 and 4 seconds between attempts; permanent authentication or recipient errors stop immediately. The relay forwards a stable idempotency key for each workflow run and attempt so Resend can deduplicate retries. Reports and patches are saved before sending.
 
 If delivery fails, the run emits a warning and preserves the report and patch. A verified patch remains `completed` with separate notification status, so email failure does not generate the same fix again. Successful delivery or a local notification preview records it as `notified`. Failed or unverified fixes keep their retry schedule: by default, after 7 days and up to 2 total attempts, even outside the discovery window. Legacy URL-only history files remain supported.
 
@@ -207,8 +228,10 @@ The hosted Ubuntu runner frees unused Android, .NET and Swift SDKs before instal
 ## Security
 
 - Target repository setup, builds and tests run in throwaway containers with a read-only source mount and no credentials. Static document checks only parse files on the host.
-- Claude Code can read and edit files, with shell and web access disabled. The target repository's `.claude/` and `.mcp.json` are removed before it starts to prevent automatic hooks or MCP servers from running.
-- Claude Code receives its OAuth token, while the other secrets are removed from its environment. Email bodies and patches are redacted for known secrets, including base64 and URL-encoded forms. Credential-shaped content that survives filtering causes the patch to be withheld. A withheld patch or remaining credential-shaped HTML makes the email fall back to plain text.
+- Claude Code uses restricted mode with an explicit file-tool allowlist; shell, web, hooks, and MCP tools are unavailable. The target repository's `.claude/` and `.mcp.json` are removed before it starts.
+- API and Codex solvers use Scout's bounded repository text tools. Codex reasons in a separate read-only directory with native shell, web search, image tools, and plugins disabled. Scout performs the requested reads and edits after checking paths; it rejects traversal, symlinks, metadata, and credential files. Tests remain inside Docker.
+- CLI processes receive only their selected provider credential; other known keys and secret-named variables are removed. Known credentials are redacted from reports, patches, and traces, including base64 and URL-encoded forms. Credential-shaped content that survives filtering causes the patch to be withheld. A withheld patch or remaining credential-shaped HTML makes the email fall back to plain text.
+- The Resend key stays on the operator's relay. GitHub Actions authenticates using signed, short-lived OIDC tokens. The relay restricts each enrolled repository ID, owner ID, branch, and workflow to its registered recipient, and sets the sender itself.
 - The scout does not claim issues, post comments or submit changes to target repositories. You review and publish the contribution yourself. Its Actions workflow only saves history to its own repository.
 
 ## Limitations
@@ -218,7 +241,7 @@ The hosted Ubuntu runner frees unused Android, .NET and Swift SDKs before instal
 - Documentation-only patches support text documents. Image-only changes or docs-tooling source changes need a different validation plan.
 - Ranking uses terms, aliases and issue evidence, without embeddings.
 - Each run attempts at most one issue; the daily workflow can abstain when evidence or confidence is insufficient.
-- Every solve uses Claude Code through your subscription. There is no free-model solver.
+- Provider access and usage limits depend on your own API account or subscription. OAuth sessions are provider-specific and cannot be used as arbitrary API keys.
 
 ## Maintainer
 

@@ -1,5 +1,5 @@
-"""Issue scout: every day, find one open GitHub issue that fits my profile, fix it with
-Claude Code, test the fix in a sandbox, and email me the patch plus a review brief.
+"""Issue scout: find an open GitHub issue for a profile, draft a fix with a configured
+model provider, test it in a sandbox, and deliver the patch plus a review brief.
 
 LangGraph pipeline: discover -> shortlist -> gate -> pick -> revalidate -> solve -> notify
 """
@@ -9,8 +9,6 @@ import os
 import re
 import shlex
 import shutil
-import smtplib
-import ssl
 import subprocess
 import tempfile
 import time
@@ -23,7 +21,6 @@ from urllib.parse import quote
 from uuid import uuid4
 
 import requests
-from langchain_groq import ChatGroq
 from langgraph.graph import END, START, StateGraph
 from langsmith import traceable
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -31,6 +28,8 @@ from workloads import (LANGUAGE_RUNTIMES, RUNTIME_IMAGES, TEST_PHASE, canonical_
                        check_documentation, inspect_languages, manifest_rank, safe_path, validation_script)
 
 import email_html
+import email_delivery
+import model_providers
 from github_api import gh, gh_file, http
 from prompts import FIX, TASK, correction_prompt, picker_prompt
 # CLAIM and skill_matches are re-exported: the tests reach them through scout.
@@ -39,8 +38,8 @@ from ranking import (CLAIM, RESOLUTION, UNRESOLVED, active_claims, discussion_ex
                      skill_matches)
 # forms is re-exported: the tests reach it through scout.
 from redaction import forms, outbound, redact, redact_shapes, scan_secrets, scrub
-from settings import (AGENT_KEEPS, GITHUB, LANGUAGES, MAX_FIXES, MODEL, PACE, PROFILE, REPORTS,
-                      REQUIRED, ROOT, SCOUT, SECRETS, SEEN, WORK_TYPES)
+from settings import (AGENT_KEEPS, GITHUB, LANGUAGES, MAX_FIXES, MODEL, PACE, PICKER, PROFILE, REPORTS,
+                      ROOT, SCOUT, SECRETS, SEEN, SOLVER, WORK_TYPES)
 
 if os.environ.get("LANGSMITH_API_KEY"):  # one secret turns tracing on; nothing else to remember
     os.environ.setdefault("LANGSMITH_TRACING", "true")
@@ -75,8 +74,11 @@ def git(cwd, *args):
 
 
 def llm(schema):
-    # json_schema, not Groq's default function_calling: gpt-oss 400s with "model did not call a tool"
-    return ChatGroq(model=MODEL, temperature=0).with_structured_output(schema, method="json_schema")
+    if PICKER.provider == "groq":
+        from langchain_groq import ChatGroq
+        # json_schema, not function_calling: gpt-oss otherwise fails tool selection.
+        return ChatGroq(model=MODEL, api_key=PICKER.api_key or None, temperature=0).with_structured_output(schema, method="json_schema")
+    return model_providers.StructuredModel(PICKER, schema)
 
 
 # ---------- discover / shortlist ----------
@@ -851,7 +853,7 @@ def revalidate(state):
         return {"issue": None, "candidates": remaining}
 
 
-# ---------- solve: Claude Code edits, Docker runs the repo's code ----------
+# ---------- solve: the selected provider edits, Docker runs the repo's code ----------
 
 BRIEF_SCHEMA = {
     "type": "object",
@@ -885,21 +887,15 @@ BRIEF_SCHEMA = {
 
 @traceable(run_type="llm", name="claude-code", process_inputs=scrub, process_outputs=scrub)
 def claude(prompt, cwd, session=None):
-    cmd = ["claude", "-p", prompt, "--output-format", "json", "--json-schema", json.dumps(BRIEF_SCHEMA),
-           "--permission-mode", "dontAsk", "--permission-prompts", "none",
-           "--allowedTools", "Read,Edit,Write,Glob,Grep", "--disallowedTools", "Bash,WebFetch,WebSearch"]
-    if session:
-        cmd += ["--resume", session]
-    # the agent can read any absolute path, so don't leave the other secrets in its environment
-    env = {k: v for k, v in os.environ.items() if k not in SECRETS or k in AGENT_KEEPS}
-    out = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=1800)
-    try:
-        data = json.loads(out.stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"claude exited {out.returncode}: {(out.stderr or out.stdout)[-1500:]}")
-    if out.returncode or data.get("is_error") or not data.get("structured_output"):
-        raise RuntimeError(f"claude run failed: {str(data.get('result'))[-1500:]}")
-    return data
+    """Compatibility seam for the original Claude Code solver and its regressions."""
+    return model_providers.claude_code(prompt, cwd, BRIEF_SCHEMA, SOLVER, session)
+
+
+@traceable(run_type="chain", name="scout-solver", process_inputs=scrub, process_outputs=scrub)
+def run_solver(prompt, cwd, session=None):
+    if SOLVER.provider == "claude-code":
+        return claude(prompt, cwd, session)
+    return model_providers.solve_with_backend(SOLVER, prompt, cwd, BRIEF_SCHEMA, session)
 
 
 def clone(repo):
@@ -1065,7 +1061,7 @@ def solve(state):
     repo_dir = None
     try:
         repo_dir = clone(issue["repo"])
-        data = claude(task_prompt(issue), repo_dir)
+        data = run_solver(task_prompt(issue), repo_dir)
         for attempt in range(MAX_FIXES + 1):
             brief = data["structured_output"]
             kind, language = issue.get("work_type", "code"), issue.get("language", "python")
@@ -1073,14 +1069,15 @@ def solve(state):
             print(f"solve: attempt {attempt + 1} validation {'pass' if passed else 'fail'}")
             if passed or attempt == MAX_FIXES:
                 break
-            data = claude(FIX.format(cwd=brief["test_cwd"], files=brief["test_files"], log=log,
+            data = run_solver(FIX.format(cwd=brief["test_cwd"], files=brief["test_files"], log=log,
                                      runtime=brief.get("validation", {}).get("runtime", "python312")), repo_dir, data["session_id"])
         patch = diff(repo_dir)
         reproduces, regression_log = fails_without_fix(repo_dir, patch, brief) if passed and kind == "code" else (None, "not applicable to documentation")
         return {"result": {"brief": brief, "patch": patch, "passed": passed, "log": log,
                            "reproduces": reproduces, "regression_log": regression_log,
                            "documentation_verified": bool(passed and kind == "documentation"),
-                           "cost": data.get("total_cost_usd", 0.0)}}
+                           "cost": data.get("total_cost_usd"), "provider": SOLVER.provider,
+                           "usage": data.get("usage", {})}}
     except Exception as e:  # still email the pick: the claim matters even without a fix
         return {"result": {"error": f"{type(e).__name__}: {e}"}}
     finally:
@@ -1098,38 +1095,8 @@ def write_atomic(path, text):
 
 
 def send_email(msg):
-    """Retry transient failures on fresh, verified TLS connections; never discard the report."""
-    for attempt in range(1, 4):
-        smtp = None
-        try:
-            smtp = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30, context=ssl.create_default_context())
-            smtp.login(os.environ["GMAIL_ADDRESS"], os.environ["GMAIL_APP_PASSWORD"])
-            refused = smtp.send_message(msg)
-            if refused:
-                raise smtplib.SMTPRecipientsRefused(refused)
-        except (smtplib.SMTPException, OSError) as e:
-            error = redact(f"{type(e).__name__}: {e}")[:500]
-            if scan_secrets(error):
-                error = f"{type(e).__name__}: credential-shaped response withheld"
-            transient = (isinstance(e, smtplib.SMTPServerDisconnected)
-                         or (isinstance(e, smtplib.SMTPResponseException) and 400 <= e.smtp_code < 500)
-                         or (isinstance(e, smtplib.SMTPRecipientsRefused) and bool(e.recipients)
-                             and all(400 <= code < 500 for code, _ in e.recipients.values()))
-                         or (isinstance(e, OSError) and not isinstance(e, smtplib.SMTPException)))
-            print(f"notify: email attempt {attempt} failed ({error})")
-            if not transient or attempt == 3:
-                return {"status": "failed", "attempts": attempt, "error": error}
-        else:
-            print(f"notify: email sent on attempt {attempt}")
-            return {"status": "sent", "attempts": attempt}
-        finally:
-            if smtp is not None:
-                # A QUIT failure after acceptance must not trigger another copy of the email.
-                try:
-                    smtp.close()
-                except OSError:
-                    pass
-        time.sleep(2 ** attempt)
+    """Send through the domain owner's relay; users provide only their destination."""
+    return email_delivery.send_email(msg, PROFILE)
 
 
 def report_lines(state):
@@ -1149,7 +1116,9 @@ def report_lines(state):
                           + r.get("log", "") if issue.get("work_type") == "documentation" else
                           f"Tests: {'pass' if r['passed'] else 'FAIL'} | new test fails on the unfixed code: "
                           f"{'yes' if r['reproduces'] else 'not shown'}")
-    lines += [validation_summary + f" | Claude usage est. ${r['cost']:.2f}", "",
+    cost = r.get("cost")
+    usage_summary = f"${cost:.2f} estimated" if isinstance(cost, (int, float)) else "not reported"
+    lines += [validation_summary + f" | Provider: {r.get('provider', 'claude-code')} | Usage cost: {usage_summary}", "",
         "1) Claim it now. Comment on the issue:", b["claim_comment"], "",
         "Root cause:", b["root_cause"], "", "Approach:", b["approach"], "", "Risks:", b["risks"], "",
         "Not verified:", b["not_verified"], "",
@@ -1169,7 +1138,8 @@ def compose(state):
     msg = EmailMessage()
     subject = redact_shapes(f"[scout] {issue['repo']}#{issue['number']}: {issue['title']}")
     msg["Subject"] = re.sub(r"[\r\n]+", " ", subject)[:180]
-    msg["From"] = msg["To"] = os.environ.get("GMAIL_ADDRESS", "dry-run@localhost")
+    # The verified sender is set by the relay, never by the user or model.
+    msg["To"] = email_delivery.recipient_email(PROFILE) or "preview@localhost"
     body, patch = outbound("\n".join(report_lines(state)), r.get("patch"))
     msg.set_content(body)
     page = redact(email_html.render(state, score(issue)))
@@ -1231,7 +1201,7 @@ def notify(state):
     history[state["issue"]["html_url"]] = record
     persist(history, record["notification"])
 
-    delivery = send_email(msg) if os.environ.get("GMAIL_APP_PASSWORD") else {"status": "dry_run", "attempts": 0}
+    delivery = send_email(msg)
     record["notification"] = delivery          # record is the object inside history, so this updates both
     if successful and delivery["status"] in {"sent", "dry_run"}:
         record["status"] = "notified"
@@ -1258,11 +1228,12 @@ def build():
 
 
 if __name__ == "__main__":
+    if PROFILE.get("setup_required"):
+        raise SystemExit("SETUP_REQUIRED: personalize profile.json (or finish setup in the Issue Scout app) before running Scout")
     print(f"scout: revision={os.environ.get('GITHUB_SHA', 'local')} "
           f"languages={','.join(sorted(LANGUAGES))} work_types={','.join(sorted(WORK_TYPES))} "
           f"general_issues={SCOUT['general_issues']} min_stars={SCOUT['min_stars']}")
-    missing = [k for k in REQUIRED if not os.environ.get(k)]
-    if missing and os.environ.get("CI"):
-        raise SystemExit(f"Empty secrets: {', '.join(missing)}. Add each one under Settings > Secrets and variables > "
-                         "Actions > Secrets tab > New repository secret (not Variables, not an environment).")
+    email_delivery.check_configuration(PROFILE)
+    for provider in (PICKER, SOLVER):
+        model_providers.check_provider(provider)
     build().invoke({})

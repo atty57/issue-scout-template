@@ -1,12 +1,11 @@
 name: issue-scout
 
 on:
-  schedule:
-    - cron: "30 15 * * *"   # 11:30 ET in summer, 10:30 in winter; GitHub may start scheduled runs a bit late
-  workflow_dispatch:
+  workflow_dispatch:   # manual only until you add a schedule; see README "Schedule"
 
 permissions:
   contents: write   # commit state/seen.json
+  id-token: write   # authenticate to the owner's email relay without user mail credentials
 
 concurrency: scout
 
@@ -14,6 +13,18 @@ jobs:
   scout:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      SCOUT_PICKER_PROVIDER: ${{ vars.SCOUT_PICKER_PROVIDER || 'groq' }}
+      SCOUT_SOLVER_PROVIDER: ${{ vars.SCOUT_SOLVER_PROVIDER || 'claude-code' }}
+      SCOUT_PICKER_MODEL: ${{ vars.SCOUT_PICKER_MODEL }}
+      SCOUT_SOLVER_MODEL: ${{ vars.SCOUT_SOLVER_MODEL }}
+      SCOUT_MODEL: ${{ vars.SCOUT_MODEL || 'openai/gpt-oss-120b' }}
+      SCOUT_PICKER_AUTH: ${{ vars.SCOUT_PICKER_AUTH || 'auto' }}
+      SCOUT_SOLVER_AUTH: ${{ vars.SCOUT_SOLVER_AUTH || 'auto' }}
+      SCOUT_PICKER_BASE_URL: ${{ vars.SCOUT_PICKER_BASE_URL }}
+      SCOUT_SOLVER_BASE_URL: ${{ vars.SCOUT_SOLVER_BASE_URL }}
+      SCOUT_RECIPIENT_EMAIL: ${{ vars.SCOUT_RECIPIENT_EMAIL }}
+      SCOUT_EMAIL_RELAY_URL: ${{ vars.SCOUT_EMAIL_RELAY_URL }}
     steps:
       - uses: actions/checkout@v7
       - name: Free runner disk space
@@ -26,14 +37,27 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install --no-cache-dir -r requirements.txt && npm install -g @anthropic-ai/claude-code && npm cache clean --force
+      - name: Install Scout and selected CLI backends
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+          if [ "$SCOUT_PICKER_PROVIDER" = "claude-code" ] || [ "$SCOUT_SOLVER_PROVIDER" = "claude-code" ]; then
+            npm install -g @anthropic-ai/claude-code
+          fi
+          if [ "$SCOUT_PICKER_PROVIDER" = "codex" ] || [ "$SCOUT_SOLVER_PROVIDER" = "codex" ]; then
+            npm install -g @openai/codex
+          fi
+          npm cache clean --force
       - run: python -u scout.py
         env:
           GH_TOKEN: ${{ github.token }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          SCOUT_API_KEY: ${{ secrets.SCOUT_API_KEY }}
+          SCOUT_PICKER_API_KEY: ${{ secrets.SCOUT_PICKER_API_KEY }}
+          SCOUT_SOLVER_API_KEY: ${{ secrets.SCOUT_SOLVER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
       - name: Upload scout report and patch
         if: ${{ always() }}

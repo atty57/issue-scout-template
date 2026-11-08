@@ -2,3 +2,5 @@
 pytest>=8.3
 # Shuffles test order every run, so a test that only passes in file order fails loudly.
 pytest-randomly>=5.0
+# Verify relay JWT authentication and delivery without making real API calls.
+-r requirements-email-relay.txt

@@ -1,13 +1,11 @@
-"""Offline regressions for preserving work through mail, timeout and cleanup failures."""
+"""Offline regressions for preserving work through delivery, timeout and cleanup failures."""
 import json
-import smtplib
-import ssl
 import subprocess
 from datetime import datetime, timezone
-from email.message import EmailMessage
 from unittest.mock import Mock
 
 import pytest
+import requests
 
 import scout
 from test_scout_selection import candidate, picker_option
@@ -19,10 +17,11 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(scout, "SEEN", tmp_path / "state" / "seen.json")
     monkeypatch.setattr(scout, "REPORTS", tmp_path / "reports")
     monkeypatch.setattr(scout.http, "get", Mock(side_effect=AssertionError("unexpected network call")))
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", Mock(side_effect=AssertionError("unexpected email send")))
+    monkeypatch.setattr(scout.email_delivery.requests, "post", Mock(side_effect=AssertionError("unexpected email send")))
+    monkeypatch.setattr(scout.email_delivery, "github_identity", Mock(return_value="signed-workflow-identity"))
     monkeypatch.setattr(scout.time, "sleep", Mock())
-    monkeypatch.setenv("GMAIL_ADDRESS", "scout@example.com")
-    monkeypatch.setenv("GMAIL_APP_PASSWORD", "sentinel-password-123456789")
+    monkeypatch.setenv("SCOUT_RECIPIENT_EMAIL", "scout@example.com")
+    monkeypatch.setenv("SCOUT_EMAIL_RELAY_URL", "https://mail.example.com/send")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     monkeypatch.delenv("CI", raising=False)
 
@@ -35,132 +34,101 @@ def result_state(**changes):
     return {"issue": picker_option(), "result": result | changes, "why": "Focused regression fix"}
 
 
-def mail_client():
-    return Mock(send_message=Mock(return_value={}))
+def response(status=200):
+    return Mock(status_code=status, json=Mock(return_value={"status": "sent"}))
 
 
-def test_disconnect_retries_fresh_connection_after_report_and_outcome_are_saved(monkeypatch):
-    first, second = mail_client(), mail_client()
-    first.login.side_effect = smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
-
-    def login(address, password):
+def test_disconnect_retries_only_after_report_patch_and_pending_history_are_saved(monkeypatch):
+    def accepted(*args, **kwargs):
         assert "Targeted tests passed" in (scout.REPORTS / "report.txt").read_text()
         assert (scout.REPORTS / "change.patch").read_text() == "+return validated_value\n"
         record = scout.load_history()[picker_option()["html_url"]]
         assert record["status"] == "completed" and record["notification"]["status"] == "pending"
+        return response()
 
-    second.login.side_effect = login
-    connect = Mock(side_effect=[first, second])
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", connect)
+    post = Mock(side_effect=[requests.ConnectionError("disconnected"), response()])
+    monkeypatch.setattr(scout.email_delivery.requests, "post", post)
+    attempts = []
+    def send(*args, **kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise requests.ConnectionError("disconnected")
+        return accepted(*args, **kwargs)
+    post.side_effect = send
     scout.notify(result_state())
     record = scout.load_history()[picker_option()["html_url"]]
     assert record["status"] == "notified" and record["attempts"] == 1
     assert record["notification"] == {"status": "sent", "attempts": 2}
-    assert connect.call_count == 2
-    for call in connect.call_args_list:
-        assert call.args == ("smtp.gmail.com", 465) and call.kwargs["timeout"] == 30
-        context = call.kwargs["context"]
-        assert context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
-    first.send_message.assert_not_called()
-    second.send_message.assert_called_once()
-    first.close.assert_called_once()
-    second.close.assert_called_once()
+    assert post.call_count == 2 and attempts[0]["json"] == attempts[1]["json"]
+    assert attempts[0]["json"]["to"] == "scout@example.com"
+    assert "from" not in attempts[0]["json"]
+    assert attempts[0]["allow_redirects"] is False
     scout.time.sleep.assert_called_once_with(2)
 
 
-def test_exhausted_smtp_retries_preserve_patch_and_do_not_make_verified_fix_retryable(monkeypatch, capsys):
-    connect = Mock(side_effect=smtplib.SMTPServerDisconnected("Connection unexpectedly closed"))
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", connect)
+def test_exhausted_email_retries_preserve_patch_without_resolving_the_issue_again(monkeypatch, capsys):
+    post = Mock(side_effect=requests.Timeout("temporary timeout"))
+    monkeypatch.setattr(scout.email_delivery.requests, "post", post)
     monkeypatch.setenv("CI", "true")
     state = result_state()
     scout.notify(state)
     record = scout.load_history()[state["issue"]["html_url"]]
     assert record["status"] == "completed" and record["attempts"] == 1
     assert record["notification"]["status"] == "failed" and record["notification"]["attempts"] == 3
-    assert "retry_after" not in record
-    assert not scout.can_retry(record, datetime.now(timezone.utc))
+    assert "retry_after" not in record and not scout.can_retry(record, datetime.now(timezone.utc))
     assert (scout.REPORTS / "change.patch").read_text() == state["result"]["patch"]
-    report = (scout.REPORTS / "report.txt").read_text()
-    assert "Targeted tests passed" in report and "SCOUT_REGRESSION:1" in report
+    assert "Targeted tests passed" in (scout.REPORTS / "report.txt").read_text()
     assert json.loads((scout.REPORTS / "notification.json").read_text()) == record["notification"]
-    assert connect.call_count == 3
+    assert post.call_count == 3
     assert [call.args for call in scout.time.sleep.call_args_list] == [(2,), (4,)]
     assert "::warning::Email notification failed" in capsys.readouterr().out
     monkeypatch.setattr(scout, "gh", Mock(return_value={"items": [candidate()]}))
     assert not scout.discover({})["candidates"]
 
 
-@pytest.mark.parametrize("error", [TimeoutError("socket timeout"), smtplib.SMTPDataError(451, b"temporary failure")])
-def test_transient_network_or_server_errors_retry(monkeypatch, error):
-    first, second = mail_client(), mail_client()
-    first.send_message.side_effect = error
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", Mock(side_effect=[first, second]))
-    assert scout.send_email(EmailMessage()) == {"status": "sent", "attempts": 2}
-    first.close.assert_called_once()
-    second.send_message.assert_called_once()
+@pytest.mark.parametrize("status", [408, 429, 500, 503])
+def test_transient_relay_failures_retry(monkeypatch, status):
+    post = Mock(side_effect=[response(status), response()])
+    monkeypatch.setattr(scout.email_delivery.requests, "post", post)
+    assert scout.send_email(scout.compose(result_state())[0]) == {"status": "sent", "attempts": 2}
+    assert post.call_count == 2
 
 
-def test_permanent_authentication_error_stops_and_redacts_secret(monkeypatch, capsys):
-    client = mail_client()
-    client.login.side_effect = smtplib.SMTPAuthenticationError(535, b"Rejected sentinel-password-123456789")
-    connect = Mock(return_value=client)
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", connect)
+@pytest.mark.parametrize("status", [301, 400, 401, 403, 413, 422])
+def test_permanent_delivery_errors_stop_without_exposing_response_bodies(monkeypatch, capsys, status):
+    reply = response(status)
+    reply.text = "secret-provider-key-in-error"
+    post = Mock(return_value=reply)
+    monkeypatch.setattr(scout.email_delivery.requests, "post", post)
     scout.notify(result_state())
     record = scout.load_history()[picker_option()["html_url"]]
     assert record["notification"]["status"] == "failed" and record["notification"]["attempts"] == 1
-    assert "SMTPAuthenticationError" in record["notification"]["error"]
-    assert "sentinel-password" not in scout.SEEN.read_text() + capsys.readouterr().out
-    assert "sentinel-password" not in (scout.REPORTS / "notification.json").read_text()
+    assert "secret-provider-key" not in scout.SEEN.read_text() + capsys.readouterr().out
     assert record["status"] == "completed"
-    connect.assert_called_once()
+    post.assert_called_once()
     scout.time.sleep.assert_not_called()
-    client.send_message.assert_not_called()
 
 
-def test_refused_recipient_is_recorded_as_failed_delivery(monkeypatch):
-    client = mail_client()
-    client.send_message.return_value = {"scout@example.com": (550, b"Recipient refused")}
-    connect = Mock(return_value=client)
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", connect)
-    delivery = scout.send_email(EmailMessage())
-    assert delivery["status"] == "failed" and delivery["attempts"] == 1
-    assert "SMTPRecipientsRefused" in delivery["error"]
-    connect.assert_called_once()
-
-
-def test_temporary_recipient_failure_retries(monkeypatch):
-    first, second = mail_client(), mail_client()
-    first.send_message.side_effect = smtplib.SMTPRecipientsRefused({"scout@example.com": (450, b"Try later")})
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", Mock(side_effect=[first, second]))
-    assert scout.send_email(EmailMessage()) == {"status": "sent", "attempts": 2}
-
-
-def test_disconnect_during_cleanup_after_acceptance_does_not_resend(monkeypatch):
-    client = mail_client()
-    client.close.side_effect = smtplib.SMTPServerDisconnected("cleanup disconnected")
-    connect = Mock(return_value=client)
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", connect)
+def test_accepted_delivery_does_not_send_another_copy(monkeypatch):
+    post = Mock(return_value=response())
+    monkeypatch.setattr(scout.email_delivery.requests, "post", post)
     scout.notify(result_state())
     assert scout.load_history()[picker_option()["html_url"]]["notification"]["status"] == "sent"
-    connect.assert_called_once()
-    client.send_message.assert_called_once()
+    post.assert_called_once()
     scout.time.sleep.assert_not_called()
 
 
-def test_abrupt_mail_interruption_keeps_report_patch_and_pending_history(monkeypatch):
-    client = mail_client()
-    client.login.side_effect = KeyboardInterrupt()
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", Mock(return_value=client))
+def test_abrupt_delivery_interruption_keeps_report_patch_and_pending_history(monkeypatch):
+    monkeypatch.setattr(scout.email_delivery.requests, "post", Mock(side_effect=KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
         scout.notify(result_state())
     assert (scout.REPORTS / "report.txt").is_file() and (scout.REPORTS / "change.patch").is_file()
     assert json.loads((scout.REPORTS / "notification.json").read_text())["status"] == "pending"
     assert scout.load_history()[picker_option()["html_url"]]["status"] == "completed"
-    client.close.assert_called_once()
 
 
 def test_failed_solver_retains_retry_schedule_even_if_email_fails(monkeypatch):
-    monkeypatch.setattr(scout.smtplib, "SMTP_SSL", Mock(side_effect=smtplib.SMTPServerDisconnected("offline")))
+    monkeypatch.setattr(scout.email_delivery.requests, "post", Mock(side_effect=requests.ConnectionError("offline")))
     scout.REPORTS.mkdir(parents=True)
     (scout.REPORTS / "change.patch").write_text("Previous patch")
     state = result_state()
@@ -174,7 +142,7 @@ def test_failed_solver_retains_retry_schedule_even_if_email_fails(monkeypatch):
 
 
 def test_secret_gate_covers_saved_report_and_patch(monkeypatch, capsys):
-    monkeypatch.delenv("GMAIL_APP_PASSWORD")
+    monkeypatch.delenv("SCOUT_EMAIL_RELAY_URL")
     unknown_token = "ghp_" + "z" * 36
     state = result_state(patch="+" + unknown_token + "\n")
     state["issue"]["title"] = "Fix response containing " + unknown_token
@@ -188,7 +156,7 @@ def test_secret_gate_covers_saved_report_and_patch(monkeypatch, capsys):
 
 
 def test_credential_shapes_are_removed_from_persisted_failure_history(monkeypatch):
-    monkeypatch.delenv("GMAIL_APP_PASSWORD")
+    monkeypatch.delenv("SCOUT_EMAIL_RELAY_URL")
     unknown_token = "ghp_" + "z" * 36
     state = result_state()
     state["why"] += " " + unknown_token
