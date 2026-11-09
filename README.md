@@ -12,7 +12,7 @@ Scout runs in your own private GitHub repository on GitHub Actions, with your Gi
 2. **Checks** that each issue is still available (not claimed, no open pull request) and that the project allows AI-assisted contributions.
 3. **Picks** the strongest issue with your chosen model, or none if nothing qualifies.
 4. **Fixes and tests** it in a throwaway container. A code fix must include a regression test that fails before the fix and passes after it.
-5. **Delivers** a review brief and patch by email from `noreply@scouts.email`, and saves them with the workflow run.
+5. **Delivers** a review brief and patch by email from Issue Scout's noreply address if you turn email on, and always saves them with the workflow run.
 
 You then claim the issue, review the change and open the pull request.
 
@@ -23,7 +23,7 @@ Scout handles code in Python, JavaScript, TypeScript, C# and C, and documentatio
 Once released, the app sets everything up without a terminal:
 
 1. Connect your GitHub account. The app creates your private Scout repository.
-2. Fill in your profile: skills, languages, the kind of work you want, and the email address for drafts.
+2. Fill in your profile: skills, languages, the kind of work you want and, if you want reports by email, your address. The app emails you a code to confirm it.
 3. Choose a model for picking issues and one for writing fixes (the same provider or different ones), and enter only the credentials those need.
 4. Choose a daily start time, or press **Run now**.
 5. Read drafts by email, and see run status, reports and patches in the app.
@@ -34,7 +34,7 @@ Once released, the app sets everything up without a terminal:
 |---|---|
 | A GitHub account. Runs use your GitHub Actions minutes and storage. | You |
 | An AI model: an API key for Groq, OpenAI, Anthropic or an OpenAI-compatible service, or a supported Claude Code or Codex subscription | You |
-| Email delivery from `noreply@scouts.email` | The Issue Scout operator. You only give your address. |
+| Email delivery from Issue Scout's noreply address | The Issue Scout operator, within a shared quota. You only give and confirm your address. |
 
 The report shows a run's model cost when the provider reports one; `n/a` means unknown, not free. Codex on GitHub-hosted runners needs an API key; its subscription login works only on a machine you control.
 
@@ -44,7 +44,7 @@ The report shows a run's model cost when the provider reports one; `n/a` means u
 - Model credentials are stored as encrypted repository secrets. Each model process receives only the credential it needs, and known secrets are removed from reports, patches and logs.
 - Project setup and tests run in throwaway containers with no credentials and a read-only copy of the source.
 - Scout never posts to the projects it scouts. You review and publish every contribution.
-- Email goes through a relay that verifies your workflow's GitHub identity. You never handle a mail password or sending key.
+- Email goes through a relay that verifies your workflow's GitHub identity, and only to an address you confirmed with a code. You never handle a mail password or sending key.
 
 ## Manual setup
 
@@ -66,7 +66,7 @@ Until the app is released:
 
    To use other models, set the `SCOUT_PICKER_PROVIDER` and `SCOUT_SOLVER_PROVIDER` repository **Variables** to `groq`, `openai`, `anthropic`, `openai-compatible`, `claude-code` or `codex`. `openai`, `anthropic` and `openai-compatible` also need a model name in `SCOUT_PICKER_MODEL` / `SCOUT_SOLVER_MODEL`; for `openai-compatible`, set your endpoint in `SCOUT_PICKER_BASE_URL` / `SCOUT_SOLVER_BASE_URL`.
 4. Open **Actions → issue-scout → Run workflow**.
-5. Download the run's `scout-result-…` artifact (kept for 14 days) for the report and patch. Shared email delivery isn't live yet; once it is, put your address in the `email` field of `profile.json` and drafts arrive by email.
+5. Download the run's `scout-result-…` artifact (kept for 14 days) for the report and patch. Shared email delivery isn't live yet. Once it is, turn it on in the Issue Scout app, which confirms your address with a code. An address in `profile.json` never sends email unless `email_enabled` is `true`.
 
 ### Daily schedule
 
@@ -96,7 +96,7 @@ To run Scout on your own computer instead, use Linux or WSL with Python 3.12 and
 **Coming up, in order**
 
 - **Test run on a fresh copy:** set up a new private copy with a different profile and models, and run it end to end.
-- **Live email delivery:** verify the `scouts.email` domain, host the relay, and confirm real delivery and failure recovery.
+- **Live email delivery:** confirm a real code, report, resend and quota-limited failure end to end. The relay is deployed, and the code, workflow and desktop setup are done.
 - **Release details:** a version manifest, release notes and a security policy.
 - **Desktop app:** GitHub connection, private repository creation, profile, email and model setup, schedule, Run now, status and reports.
 - **Updates and installers:** app auto-update, engine updates that keep your profile and history, and signed installers.

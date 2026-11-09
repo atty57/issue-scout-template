@@ -1,4 +1,6 @@
 # Operator-side delivery service only; never installed in generated Scout runners.
-requests>=2.32
-PyJWT[crypto]>=2.10
-gunicorn>=23.0; sys_platform != "win32"
+# Exact versions, as tested; update them together and rerun test_email_relay.py.
+requests==2.34.2
+PyJWT[crypto]==2.15.1
+cryptography==50.0.2
+gunicorn==26.2.0; sys_platform != "win32"

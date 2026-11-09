@@ -1,0 +1,63 @@
+name: issue-scout-email
+# Started by the Issue Scout app. It only talks to the email relay: no scouting and no model calls.
+run-name: ${{ inputs.task == 'resend' && format('Email the report from run {0} again', inputs.run_id) || 'Send an email confirmation code' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "verify: email a confirmation code. resend: email a finished run's saved report again."
+        required: true
+        type: choice
+        options: [verify, resend]
+      handle:
+        description: "Confirmation request from the Issue Scout app (verify only)"
+        required: false
+        type: string
+        default: ""
+      run_id:
+        description: "Scout run whose saved report to email again (resend only)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read   # profile.json holds the address
+  actions: read    # download the earlier run's saved report
+  id-token: write  # authenticate to the email relay without any stored credential
+
+concurrency: scout-email
+
+jobs:
+  email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SCOUT_EMAIL_RELAY_URL: ${{ vars.SCOUT_EMAIL_RELAY_URL }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install the email client
+        run: pip install --no-cache-dir "requests>=2.32"
+      - name: Download the saved report
+        if: ${{ inputs.task == 'resend' }}
+        continue-on-error: true  # an expired report is reported by the next step
+        uses: actions/download-artifact@v8
+        with:
+          pattern: scout-result-${{ inputs.run_id }}-*
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: earlier
+      - name: Email
+        env:
+          TASK: ${{ inputs.task }}
+          HANDLE: ${{ inputs.handle }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          if [ "$TASK" = "verify" ]; then
+            python -u email_delivery.py verify "$HANDLE"
+          else
+            python -u email_delivery.py resend earlier "$RUN_ID"
+          fi

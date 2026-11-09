@@ -1090,12 +1090,15 @@ def solve(state):
 def write_atomic(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     pending = path.with_suffix(path.suffix + ".tmp")
-    pending.write_text(text, encoding="utf-8")
+    if isinstance(text, bytes):  # written as is, without newline translation
+        pending.write_bytes(text)
+    else:
+        pending.write_text(text, encoding="utf-8")
     pending.replace(path)
 
 
 def send_email(msg):
-    """Send through the domain owner's relay; users provide only their destination."""
+    """Send through the operator's relay when the profile turned email on; users provide only their destination."""
     return email_delivery.send_email(msg, PROFILE)
 
 
@@ -1195,6 +1198,8 @@ def persist(history, notification):
 def notify(state):
     msg, body, patch = compose(state)
     save_report(body, patch)
+    # The exact email, uploaded with the report, so it can be sent again later without scouting or model calls.
+    write_atomic(REPORTS / email_delivery.MESSAGE_FILE, msg.as_bytes())
     history = load_history()
     record, successful = attempt_record(state, patch, history)
     # Record the attempt before sending: a crash mid-send must not look like an untried issue.
@@ -1203,14 +1208,14 @@ def notify(state):
 
     delivery = send_email(msg)
     record["notification"] = delivery          # record is the object inside history, so this updates both
-    if successful and delivery["status"] in {"sent", "dry_run"}:
+    # With email off, the saved report is the notification.
+    if successful and delivery["status"] in {"sent", "disabled"}:
         record["status"] = "notified"
     persist(history, delivery)
+    email_delivery.annotate(delivery)
     if delivery["status"] == "failed":
         print("notify: email unavailable; report and patch preserved for download")
-        if os.environ.get("CI"):
-            print("::warning::Email notification failed. Download the scout-result artifact for the report and patch.")
-    elif delivery["status"] == "dry_run":
+    elif delivery["status"] == "disabled":
         print(msg)
     return {}
 

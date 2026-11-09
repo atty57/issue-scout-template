@@ -17,7 +17,7 @@ import scout
 from test_scout_recovery import result_state
 
 
-ENDPOINT = "https://mail.example.com/send"
+ENDPOINT = "https://mail.example.com"  # the relay's base URL, also the OIDC audience
 
 
 @pytest.fixture(autouse=True)
@@ -47,15 +47,32 @@ def test_recipient_setting_overrides_profile_without_any_password(monkeypatch):
     assert message["To"] == "override@example.com" and message["From"] is None
 
 
-def test_no_configured_relay_previews_without_network_or_credentials():
+def test_email_left_off_sends_nothing_even_with_an_address_and_relay(monkeypatch):
+    monkeypatch.setenv("SCOUT_EMAIL_RELAY_URL", ENDPOINT)
+    monkeypatch.setenv("SCOUT_RECIPIENT_EMAIL", "old@example.com")
     message, _, _ = scout.compose(result_state())
-    assert email_delivery.send_email(message, {"email": "dev@example.com"}) == {"status": "dry_run", "attempts": 0}
+    for profile in ({"email": "dev@example.com"}, {"email": "dev@example.com", "email_enabled": False}):
+        assert email_delivery.send_email(message, profile) == {"status": "disabled", "attempts": 0}
+
+
+def test_turned_on_email_needs_an_address_before_any_paid_call():
+    with pytest.raises(ValueError, match="no destination address"):
+        email_delivery.check_configuration({"email": "", "email_enabled": True})
+    with pytest.raises(ValueError, match="true or false"):
+        email_delivery.check_configuration({"email": "dev@example.com", "email_enabled": "yes"})
+    email_delivery.check_configuration({"email": "", "email_enabled": False})
+
+
+def test_relay_url_is_the_base_address(monkeypatch):
+    monkeypatch.setenv("SCOUT_EMAIL_RELAY_URL", ENDPOINT + "/send")
+    with pytest.raises(ValueError, match="without /send"):
+        email_delivery.relay_url()
 
 
 def test_local_run_without_workflow_identity_preserves_delivery_error(monkeypatch):
     monkeypatch.setenv("SCOUT_EMAIL_RELAY_URL", ENDPOINT)
     message, _, _ = scout.compose(result_state())
-    delivery = email_delivery.send_email(message, {"email": "dev@example.com"})
+    delivery = email_delivery.send_email(message, {"email": "dev@example.com", "email_enabled": True})
     assert delivery["status"] == "failed" and delivery["attempts"] == 0
     assert "GitHub Actions identity" in delivery["error"]
 
@@ -121,10 +138,11 @@ def payload(**changes):
 
 
 @pytest.fixture
-def relay(signing_key):
+def relay(signing_key, tmp_path):
     jwks = Mock(get_signing_key_from_jwt=Mock(return_value=SimpleNamespace(key=signing_key.public_key())))
-    return email_relay.EmailRelay("private-resend-key", "drafts@example.com", ENDPOINT,
-                                 {"12345678": {"owner_id": "9876", "email": "dev@example.com"}}, jwks)
+    return email_relay.EmailRelay("private-resend-key", "drafts@example.com", ENDPOINT, b"s" * 32,
+                                  email_relay.Store(tmp_path / "relay.sqlite3"),
+                                  recipients={"12345678": {"owner_id": "9876", "email": "dev@example.com"}}, jwks_client=jwks)
 
 
 def invoke(relay, token, body=None, **changes):
@@ -221,7 +239,7 @@ def test_transport_exception_cannot_echo_the_resend_key_to_users(monkeypatch, re
 
 
 def test_user_configuration_and_workflow_never_request_or_receive_the_resend_key():
-    for filename in (".env.example", ".github/workflows/daily.yml", "profile.example.json"):
+    for filename in (".env.example", ".github/workflows/daily.yml", ".github/workflows/email.yml", "profile.example.json"):
         assert "RESEND_API_KEY" not in (scout.ROOT / filename).read_text(encoding="utf-8")
 
 

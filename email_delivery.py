@@ -1,11 +1,40 @@
-"""Recipient-only client for the operator's Resend relay. No user mail passwords."""
+"""Recipient-only client for the operator's Resend relay. No user mail passwords.
+
+Also a small CLI for the email workflow (.github/workflows/email.yml), which never scouts or calls a model:
+    python email_delivery.py verify <handle>              ask the relay to email a confirmation code
+    python email_delivery.py resend <artifacts> <run-id>  email a finished run's saved report again
+"""
 import base64
+import email
+import email.policy
+import json
 import os
 import re
+import sys
 import time
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
+
+
+MESSAGE_FILE = "message.eml"  # the composed email, saved with each run's report so it can be sent again
+ANNOTATION = "Issue Scout email"  # the app reads "<ANNOTATION>: <status> (<reason>)" from the job's annotations
+# What a failed delivery means for the user; the relay answers with one of these reasons.
+REASONS = {
+    "unverified": "This address isn't confirmed for this repository. Confirm it in the Issue Scout app, then send the report again.",
+    "user_limit": "You've reached Issue Scout's email limit for now. It resets daily and monthly (UTC).",
+    "quota": "Issue Scout's shared email quota is used up for now. It resets daily and monthly (UTC).",
+    "busy": "The email service was busy.",
+    "in_progress": "The email service was still sending this report.",
+    "unavailable": "The email service is temporarily unavailable.",
+    "duplicate": "This run's email was already sent with different content.",
+    "unconfirmed": "An earlier attempt may already have delivered this report, so it isn't sent again. Check your inbox; the report is also in the Issue Scout app.",
+    "rejected": "The email service rejected the message. Contact the Issue Scout operator.",
+    "forbidden": "This workflow isn't allowed to send Issue Scout email.",
+    "not_configured": "Email is on, but this repository has no SCOUT_EMAIL_RELAY_URL. Turn email off and on again in the Issue Scout app.",
+}
+TRANSIENT = {"busy", "in_progress", "unavailable"}
 
 
 def validate_email(value):
@@ -26,12 +55,18 @@ def validate_email(value):
     return f"{local}@{domain}"
 
 
+def email_enabled(profile):
+    """Email goes out only when it was turned on; an address left in the profile never sends by itself."""
+    return profile.get("email_enabled") is True
+
+
 def recipient_email(profile):
     value = os.environ.get("SCOUT_RECIPIENT_EMAIL") or profile.get("email", "")
     return validate_email(value) if value else ""
 
 
 def relay_url():
+    """The relay's base HTTPS URL. It is also the audience of the GitHub identity sent to it."""
     value = os.environ.get("SCOUT_EMAIL_RELAY_URL", "").rstrip("/")
     if not value:
         return ""
@@ -39,10 +74,16 @@ def relay_url():
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
             or parsed.password is not None or parsed.query or parsed.fragment):
         raise ValueError("SCOUT_EMAIL_RELAY_URL must be HTTPS without embedded credentials, query, or fragment")
+    if parsed.path.endswith("/send"):
+        raise ValueError("SCOUT_EMAIL_RELAY_URL is the relay's base URL, without /send")
     return value
 
 
 def check_configuration(profile):
+    if not isinstance(profile.get("email_enabled", False), bool):
+        raise ValueError("email_enabled must be true or false")
+    if email_enabled(profile) and not recipient_email(profile):
+        raise ValueError("Email is on, but profile.json has no destination address")
     recipient_email(profile)
     relay_url()
 
@@ -57,6 +98,10 @@ def message_payload(message, recipient):
         payload["attachments"].append({"filename": attachment.get_filename(),
                                        "content": base64.b64encode(attachment.get_payload(decode=True)).decode("ascii")})
     return payload
+
+
+def load_message(path):
+    return email.message_from_bytes(Path(path).read_bytes(), policy=email.policy.default)
 
 
 def github_identity(audience):
@@ -80,28 +125,119 @@ def github_identity(audience):
         raise ValueError("Could not authenticate email delivery with GitHub Actions identity") from None
 
 
-def send_email(message, profile):
+def failed(attempts, reason=None, error=None):
+    return {"status": "failed", "attempts": attempts, **({"reason": reason} if reason else {}),
+            "error": error or REASONS.get(reason, "Email delivery failed")}
+
+
+def relay_post(path, body):
+    """POST to the relay with this run's GitHub identity, retrying only answers that can succeed later."""
     try:
-        recipient, endpoint = recipient_email(profile), relay_url()
-        if not recipient or not endpoint:
-            return {"status": "dry_run", "attempts": 0}
-        identity = github_identity(endpoint)
-        payload = message_payload(message, recipient)
+        base = relay_url()
+        if not base:
+            return failed(0, "not_configured")
+        identity = github_identity(base)
     except ValueError as error:
-        return {"status": "failed", "attempts": 0, "error": str(error)}
+        return failed(0, error=str(error))
     for attempt in range(1, 4):
         try:
-            response = requests.post(endpoint, json=payload, headers={"Authorization": f"Bearer {identity}"},
+            response = requests.post(f"{base}{path}", json=body, headers={"Authorization": f"Bearer {identity}"},
                                      timeout=30, allow_redirects=False)
             status = response.status_code
-            if status == 200 and response.json().get("status") == "sent":
+            try:
+                data = response.json()
+            except (ValueError, AttributeError):
+                data = {}
+            data = data if isinstance(data, dict) else {}
+            if status == 200 and data.get("status") == "sent":
                 return {"status": "sent", "attempts": attempt}
-            transient = status in {200, 408, 429} or status >= 500
-            error = f"Email relay returned HTTP {status}" if status != 200 else "Email relay returned an invalid acknowledgement"
+            reason = data.get("reason") if data.get("reason") in REASONS else None
+            transient = (status == 200 or status == 408 or status >= 500 or reason in TRANSIENT
+                         or (status == 429 and reason not in {"quota", "user_limit"}))
+            error = REASONS.get(reason) or (f"Email relay returned HTTP {status}" if status != 200
+                                            else "Email relay returned an invalid acknowledgement")
         except (requests.RequestException, ValueError, AttributeError):
-            # The relay uses a stable Resend idempotency key, so ambiguous POST
+            # The relay keeps one Resend idempotency key per run, so ambiguous POST
             # failures can be retried without creating another copy of the email.
-            transient, error = True, "Email relay connection or acknowledgement failed"
+            transient, reason, error = True, None, "Email relay connection or acknowledgement failed"
         if not transient or attempt == 3:
-            return {"status": "failed", "attempts": attempt, "error": error}
+            return failed(attempt, reason, error)
         time.sleep(2 ** attempt)
+
+
+def send_email(message, profile, source=None):
+    """Email a composed report. `source` names the earlier run whose report this sends again."""
+    if not email_enabled(profile):
+        return {"status": "disabled", "attempts": 0}
+    try:
+        recipient = recipient_email(profile)
+        if not recipient:
+            raise ValueError("Email is on, but profile.json has no destination address")
+        payload = message_payload(message, recipient)
+    except ValueError as error:
+        return failed(0, error=str(error))
+    return relay_post("/send", payload | ({"source": source} if source else {}))
+
+
+def request_verification(profile, handle):
+    """Ask the relay to email a confirmation code for the profile's address (before email is turned on)."""
+    try:
+        recipient = recipient_email(profile)
+        if not recipient:
+            raise ValueError("Save an email address in the Issue Scout app first")
+        if not isinstance(handle, str) or not re.fullmatch(r"[0-9a-f]{64}", handle):
+            raise ValueError("Start the confirmation from the Issue Scout app")
+    except ValueError as error:
+        return failed(0, error=str(error))
+    return relay_post("/verify", {"to": recipient, "handle": handle})
+
+
+def resend(directory, run_id, profile):
+    """Email a finished run's saved report again from its downloaded artifact, without scouting again."""
+    if not re.fullmatch(r"\d{1,20}", run_id or ""):
+        return failed(0, error="Choose the scout run to email again")
+    saved = []
+    for path in Path(directory).glob(f"scout-result-{run_id}-*/{MESSAGE_FILE}"):
+        if match := re.fullmatch(rf"scout-result-{run_id}-(\d{{1,4}})", path.parent.name):
+            saved.append((int(match.group(1)), path))
+    if not saved:
+        return failed(0, error="That run's saved report has expired or wasn't saved, so it can't be emailed again")
+    attempt, path = max(saved)
+    return send_email(load_message(path), profile, {"run_id": run_id, "run_attempt": str(attempt)})
+
+
+def _escape(value, property=False):
+    """Workflow command escaping; property values also escape ':' and ','."""
+    table = {"%": "%25", "\r": "%0D", "\n": "%0A"} | ({":": "%3A", ",": "%2C"} if property else {})
+    return "".join(table.get(char, char) for char in value)
+
+
+def annotate(delivery):
+    """A workflow annotation that both the app and GitHub's run page show."""
+    if not os.environ.get("CI"):
+        return
+    status, reason = delivery["status"], delivery.get("reason")
+    message = {"sent": "Your report was emailed.",
+               "disabled": "Email is off. The report and patch are saved with this run."}.get(status) or (
+        delivery.get("error", "Email delivery failed").rstrip(".") + ". Download the scout-result artifact for the report and patch.")
+    title = f"{ANNOTATION}: {status}" + (f" ({reason})" if reason else "")
+    print(f"::{'warning' if status == 'failed' else 'notice'} title={_escape(title, True)}::{_escape(message)}")
+
+
+def main(argv):
+    profile = json.loads(Path(os.environ.get("SCOUT_PROFILE", "profile.json")).read_text(encoding="utf-8"))
+    if not isinstance(profile, dict):
+        raise SystemExit("profile.json must be an object")
+    if argv[:1] == ["verify"] and len(argv) == 2:
+        delivery = request_verification(profile, argv[1])
+    elif argv[:1] == ["resend"] and len(argv) == 3:
+        delivery = resend(argv[1], argv[2], profile)
+    else:
+        raise SystemExit(__doc__)
+    annotate(delivery)
+    print(f"email: {delivery['status']}" + (f" ({delivery['error']})" if delivery.get("error") else ""))
+    return 0 if delivery["status"] == "sent" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,7 @@
+# Only the email relay is built from this repository (deploy/relay/Dockerfile). Send the builder just its files,
+# never the engine, profiles, reports, local virtualenvs or .env files.
+*
+!deploy/relay/Dockerfile
+!requirements-email-relay.txt
+!email_delivery.py
+!email_relay.py

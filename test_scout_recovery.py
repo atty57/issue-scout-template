@@ -21,7 +21,8 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(scout.email_delivery, "github_identity", Mock(return_value="signed-workflow-identity"))
     monkeypatch.setattr(scout.time, "sleep", Mock())
     monkeypatch.setenv("SCOUT_RECIPIENT_EMAIL", "scout@example.com")
-    monkeypatch.setenv("SCOUT_EMAIL_RELAY_URL", "https://mail.example.com/send")
+    monkeypatch.setitem(scout.PROFILE, "email_enabled", True)
+    monkeypatch.setenv("SCOUT_EMAIL_RELAY_URL", "https://mail.example.com")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     monkeypatch.delenv("CI", raising=False)
 
@@ -81,7 +82,8 @@ def test_exhausted_email_retries_preserve_patch_without_resolving_the_issue_agai
     assert json.loads((scout.REPORTS / "notification.json").read_text()) == record["notification"]
     assert post.call_count == 3
     assert [call.args for call in scout.time.sleep.call_args_list] == [(2,), (4,)]
-    assert "::warning::Email notification failed" in capsys.readouterr().out
+    assert ("::warning title=Issue Scout email%3A failed::Email relay connection or acknowledgement failed. "
+            "Download the scout-result artifact") in capsys.readouterr().out
     monkeypatch.setattr(scout, "gh", Mock(return_value={"items": [candidate()]}))
     assert not scout.discover({})["candidates"]
 

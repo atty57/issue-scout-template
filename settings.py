@@ -31,8 +31,8 @@ DEFAULTS = {
     "general_issues": False, "min_stars": 200,
     "exclude_labels": ["good first issue"],
 }
-PROFILE_FIELDS = {"setup_required", "email", "summary", "skills", "skill_aliases", "languages", "work_types",
-                  "labels", "documentation_labels", "watchlist", "merged_in", "days", "scouting"}
+PROFILE_FIELDS = {"setup_required", "email", "email_enabled", "summary", "skills", "skill_aliases", "languages",
+                  "work_types", "labels", "documentation_labels", "watchlist", "merged_in", "days", "scouting"}
 REQUIRED_FIELDS = ("days", "labels", "languages", "merged_in", "skills", "watchlist")  # read as PROFILE[...]
 POSITIVE_INTEGERS = ("updated_days", "search_pages", "candidate_limit", "shortlist_size", "max_comment_pages",
                      "max_timeline_pages", "claim_days", "retry_days", "max_attempts", "min_stars")
@@ -60,6 +60,9 @@ def load_settings(profile):
         raise ValueError(f"unknown profile fields: {', '.join(unknown)}")
     if not isinstance(profile.get("scouting", {}), dict):
         raise ValueError("scouting must be an object")
+    # The app's on/off switch for email. Without it set to true, an address in `email` never sends.
+    if type(profile.get("email_enabled", False)) is not bool:
+        raise ValueError("email_enabled must be true or false")
     if "days" in profile and (type(profile["days"]) is not int or not 1 <= profile["days"] <= timedelta.max.days):
         raise ValueError(f"days must be a positive integer at most {timedelta.max.days}")
     for name in ("languages", "watchlist"):

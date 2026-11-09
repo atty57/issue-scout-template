@@ -1,0 +1,41 @@
+# Fly.io example for the Issue Scout email relay (one small machine and a 1 GB volume, about $2.35/month
+# always on). Replace every CHANGE-ME, then from the repository root:
+#   fly apps create CHANGE-ME-issue-scout-relay
+#   fly volumes create relay_data --size 1 --region iad --config deploy/relay/fly.toml
+#   fly secrets set RESEND_API_KEY=... SCOUT_EMAIL_RELAY_SECRET=... --config deploy/relay/fly.toml
+#   fly deploy --config deploy/relay/fly.toml --dockerfile deploy/relay/Dockerfile
+#   fly scale count 1 --config deploy/relay/fly.toml   # SQLite on one volume: exactly one machine
+# Secrets never go in this file.
+app = "CHANGE-ME-issue-scout-relay"
+primary_region = "iad"
+
+[env]
+  SCOUT_EMAIL_FROM = "noreply@CHANGE-ME.example"        # the noreply address on your Resend-verified domain
+  SCOUT_EMAIL_RELAY_URL = "https://CHANGE-ME.fly.dev"   # this relay's public base URL, or your own subdomain
+  SCOUT_EMAIL_DB = "/data/relay.sqlite3"
+  # Shared limits match Resend's free plan; raise them if you move to a paid plan.
+  SCOUT_EMAIL_DAILY_LIMIT = "100"
+  SCOUT_EMAIL_MONTHLY_LIMIT = "3000"
+
+[mounts]
+  source = "relay_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Stopping when idle cuts the cost further; a stopped machine starts on the next request in a few seconds.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

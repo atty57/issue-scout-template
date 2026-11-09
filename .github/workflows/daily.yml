@@ -23,7 +23,7 @@ jobs:
       SCOUT_SOLVER_AUTH: ${{ vars.SCOUT_SOLVER_AUTH || 'auto' }}
       SCOUT_PICKER_BASE_URL: ${{ vars.SCOUT_PICKER_BASE_URL }}
       SCOUT_SOLVER_BASE_URL: ${{ vars.SCOUT_SOLVER_BASE_URL }}
-      SCOUT_RECIPIENT_EMAIL: ${{ vars.SCOUT_RECIPIENT_EMAIL }}
+      # Set by the Issue Scout app when email is on. The address and on/off switch live in profile.json.
       SCOUT_EMAIL_RELAY_URL: ${{ vars.SCOUT_EMAIL_RELAY_URL }}
     steps:
       - uses: actions/checkout@v7
@@ -68,6 +68,7 @@ jobs:
             reports/report.txt
             reports/change.patch
             reports/notification.json
+            reports/message.eml
           if-no-files-found: ignore
           retention-days: 14
       - name: Remember discovery progress and picked issues
