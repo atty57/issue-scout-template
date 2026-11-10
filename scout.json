@@ -1,0 +1,5 @@
+{
+  "manifest_version": 1,
+  "languages": ["python", "javascript", "typescript", "csharp", "c", "go", "rust", "java", "cpp"],
+  "work_types": ["code", "documentation"]
+}

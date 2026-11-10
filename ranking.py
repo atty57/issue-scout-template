@@ -48,6 +48,11 @@ LANGUAGE_TERMS = {
     "python": r"\bpython\b|\.py\b", "javascript": r"\bjavascript\b|\bnode\.?js\b|\.(?:js|jsx|mjs)\b",
     "typescript": r"\btypescript\b|\.(?:ts|tsx)\b", "csharp": r"(?<!\w)c#|\bcsharp\b|\.cs\b|\bdotnet\b|\.net\b",
     "c": r"\b(?:c language|c compiler|c library|c code|gcc|cmake)\b|\w+\.c\b",
+    # "go" alone is an ordinary word, so Go needs Go-specific evidence.
+    "go": r"\bgolang\b|\bgo (?:test|build|vet|mod|module|modules|toolchain|version)\b|\bgo\.mod\b|\w+\.go\b",
+    "rust": r"\brust(?:c|up)?\b|\bcargo\b|\bcrates\.io\b|\w+\.rs\b",
+    "java": r"\bjava\b|\bjvm\b|\bjunit\b|\bmaven\b|\bgradle\b|\w+\.java\b",
+    "cpp": r"(?<!\w)c\+\+|\bcpp\b|(?<!\w)(?:g|clang)\+\+|\w+\.(?:cpp|cc|cxx|hpp|hh|hxx)\b",
 }
 
 

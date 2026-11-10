@@ -11,20 +11,30 @@ RUNTIME_IMAGES = {
     "python312": "python:3.12", "node22": "node:22", "node24": "node:24", "node26": "node:26",
     "dotnet8": "mcr.microsoft.com/dotnet/sdk:8.0", "dotnet9": "mcr.microsoft.com/dotnet/sdk:9.0",
     "dotnet10": "mcr.microsoft.com/dotnet/sdk:10.0", "c_gcc14": "gcc:14",
+    "go126": "golang:1.26", "go127": "golang:1.27", "rust1": "rust:1",
+    "java21_maven": "maven:3-eclipse-temurin-21", "java25_maven": "maven:3-eclipse-temurin-25",
+    "java21_gradle": "gradle:jdk21", "java25_gradle": "gradle:jdk25", "cpp_gcc14": "gcc:14",
     "documentation": "python:3.12",
 }
+# Keep scout.json's "languages" in this order and in step (test_languages.py checks it).
 LANGUAGE_RUNTIMES = {
     "python": ["python312"], "javascript": ["node22", "node24", "node26"],
     "typescript": ["node22", "node24", "node26"], "csharp": ["dotnet8", "dotnet9", "dotnet10"],
-    "c": ["c_gcc14"],
+    "c": ["c_gcc14"], "go": ["go126", "go127"], "rust": ["rust1"],
+    "java": ["java21_maven", "java25_maven", "java21_gradle", "java25_gradle"], "cpp": ["cpp_gcc14"],
 }
+MAVEN_FILES = {"pom.xml", "mvnw"}
+GRADLE_FILES = {"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew"}
+CPP_SUFFIXES = (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx")
+NATIVE_BUILD_FILES = {"Makefile", "CMakeLists.txt", "meson.build", "configure.ac"}
 DOC_SUFFIXES = {".md", ".mdx", ".rst", ".txt", ".adoc"}
 TEST_PHASE = "SCOUT_TEST_PHASE_STARTED"
 
 
 def canonical_language(value):
     value = value.lower().strip()
-    return {"c#": "csharp", "c sharp": "csharp", "js": "javascript", "ts": "typescript"}.get(value, value)
+    return {"c#": "csharp", "c sharp": "csharp", "js": "javascript", "ts": "typescript",
+            "c++": "cpp", "c plus plus": "cpp", "golang": "go"}.get(value, value)
 
 
 def safe_path(value):
@@ -110,10 +120,26 @@ def inspect_languages(paths, read_file, python_context, truncated=False):
                 contexts["csharp"]["status"] = "unknown"
     c_sources = [p for p in paths if p.endswith(".c")]
     if c_sources:
-        build_files = [p for p in paths if PurePosixPath(p).name in {"Makefile", "CMakeLists.txt", "meson.build", "configure.ac"}]
+        build_files = [p for p in paths if PurePosixPath(p).name in NATIVE_BUILD_FILES]
         contexts["c"] = {"status": "supported" if build_files else "unknown",
                          "reason": "C sources and build metadata found" if build_files else "C build/test plan needs confirmation",
                          "build_files": build_files[:8], "source_examples": c_sources[:6], "runtimes": ["c_gcc14"]}
+    # Build files are evidence of how a project builds and tests; the solver still proposes the commands.
+    def named(names):
+        return sorted(p for p in paths if PurePosixPath(p).name in names)
+
+    maven, gradle = named(MAVEN_FILES), named(GRADLE_FILES)
+    java_runtimes = [r for r in LANGUAGE_RUNTIMES["java"] if (maven and r.endswith("_maven")) or (gradle and r.endswith("_gradle"))]
+    for language, suffixes, build_files, runtimes, kind in [
+            ("go", (".go",), named({"go.mod"}), LANGUAGE_RUNTIMES["go"], "Go module"),
+            ("rust", (".rs",), named({"Cargo.toml"}), LANGUAGE_RUNTIMES["rust"], "Cargo package"),
+            ("java", (".java",), sorted(maven + gradle), java_runtimes or LANGUAGE_RUNTIMES["java"], "Maven or Gradle build"),
+            ("cpp", CPP_SUFFIXES, named(NATIVE_BUILD_FILES), LANGUAGE_RUNTIMES["cpp"], "C++ build metadata")]:
+        sources = [p for p in paths if p.endswith(suffixes)]
+        if sources:
+            contexts[language] = {"status": "supported" if build_files else "unknown",
+                                  "reason": f"{kind} and sources found" if build_files else f"{kind} needs confirmation",
+                                  "build_files": build_files[:8], "source_examples": sources[:6], "runtimes": runtimes}
     docs = [p for p in paths if documentation_path(p)]
     if docs:
         contexts["documentation"] = {"status": "supported", "reason": "Documentation files found; static checks available",

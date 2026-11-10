@@ -213,6 +213,9 @@ def load_retry_cursor(path):
     return retry_after, canonical_issue_url(cursor["last_checked_url"])
 
 
+GITHUB_LANGUAGE_NAMES = {"csharp": "C#", "cpp": "C++"}  # GitHub search's names where they differ from Scout's
+
+
 def discover(state):
     now = datetime.now(timezone.utc)
     since = now.date() - timedelta(days=min(PROFILE["days"], now.toordinal() - 1))
@@ -222,7 +225,7 @@ def discover(state):
     languages = dict.fromkeys(canonical_language(lang) for lang in PROFILE["languages"])
     queries = [(f'{base} {"updated" if label.casefold() == "help wanted" else "created"}:>='
                 f'{updated if label.casefold() == "help wanted" else since} label:"{label}" '
-                f'language:"{"C#" if lang == "csharp" else lang}"',
+                f'language:"{GITHUB_LANGUAGE_NAMES.get(lang, lang)}"',
                 "updated" if label.casefold() == "help wanted" else "created", lang)
                for lang in languages for label in PROFILE["labels"] if "code" in WORK_TYPES]
     if "documentation" in WORK_TYPES:

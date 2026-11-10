@@ -16,7 +16,7 @@ Scout runs in your own private GitHub repository on GitHub Actions, with your Gi
 
 You then claim the issue, review the change and open the pull request.
 
-Scout handles code in Python, JavaScript, TypeScript, C# and C, and documentation fixes in any project.
+Scout handles code in Python, JavaScript, TypeScript, C#, C, Go, Rust, Java and C++, and documentation fixes in any project.
 
 ## With the app
 
