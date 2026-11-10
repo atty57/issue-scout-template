@@ -1,4 +1,5 @@
 """Offline coverage for general contributions, ecosystem plans and docs verification."""
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
@@ -324,12 +325,17 @@ def test_documentation_solve_validates_patch_without_inventing_regression(monkey
     regression = Mock(side_effect=AssertionError("docs must not require a code regression"))
     monkeypatch.setattr(scout, "fails_without_fix", regression)
     result = scout.solve({"issue": issue})["result"]
-    assert result["passed"] and result["documentation_verified"]
+    assert result["passed"] and result["documentation_verified"] and result["fix_attempts"] == 1
     assert result["reproduces"] is None
     assert "+Install the package." in result["patch"]
     regression.assert_not_called()
     scout.notify({"issue": issue, "result": result, "why": "Precise documentation correction"})
     assert "code regression: not applicable" in capsys.readouterr().out
+    saved = json.loads((scout.REPORTS / "result.json").read_text(encoding="utf-8"))
+    assert saved["outcome"] == "fix_verified" and saved["reason"] == "Documentation checks pass."
+    assert saved["fix"]["documentation_verified"] is True and saved["fix"]["regression_reproduced"] is None
+    assert saved["fix"]["fix_attempts"] == 1 and saved["issue"]["work_type"] == "documentation"
+    assert saved["patch_file"] == "change.patch" and (scout.REPORTS / "change.patch").read_text() == result["patch"]
     record = scout.load_history()[issue["html_url"]]
     assert record["status"] == "notified" and record["documentation_verified"]
     assert record["reproduces"] is None and "retry_after" not in record

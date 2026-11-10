@@ -806,7 +806,8 @@ def pick(state):
                and i.get("feasibility", {}).get("status") in ("supported", "unknown")]
     if not options:
         print("pick: no eligible candidates in this batch")
-        return {"issue": None, "search_more": bool(state.get("remaining_candidates"))}
+        return {"issue": None, "why": "no candidate passed the profile, score and feasibility checks",
+                "search_more": bool(state.get("remaining_candidates"))}
     listing = candidate_listing(options)
     prompt = picker_prompt(listing)
     try:
@@ -1073,7 +1074,7 @@ def solve(state):
                                      runtime=brief.get("validation", {}).get("runtime", "python312")), repo_dir, data["session_id"])
         patch = diff(repo_dir)
         reproduces, regression_log = fails_without_fix(repo_dir, patch, brief) if passed and kind == "code" else (None, "not applicable to documentation")
-        return {"result": {"brief": brief, "patch": patch, "passed": passed, "log": log,
+        return {"result": {"brief": brief, "patch": patch, "passed": passed, "log": log, "fix_attempts": attempt + 1,
                            "reproduces": reproduces, "regression_log": regression_log,
                            "documentation_verified": bool(passed and kind == "documentation"),
                            "cost": data.get("total_cost_usd"), "provider": SOLVER.provider,
@@ -1195,6 +1196,86 @@ def persist(history, notification):
     write_atomic(SEEN, json.dumps(history, indent=2))
 
 
+# ---------- result: what the run produced, for the desktop app ----------
+
+RESULT_FILE = "result.json"
+RESULT_VERSION = 1  # bump when a field changes meaning or is removed; new fields keep the version
+BRIEF_FIELDS = ("root_cause", "approach", "risks", "not_verified", "maintainer_questions", "checklist",
+                "claim_comment", "commit_message", "pr_title", "pr_body")
+
+
+def cleaned(value):
+    """Every string through the shape-based redaction a withheld email body gets."""
+    if isinstance(value, str):
+        return redact_shapes(value)
+    if isinstance(value, list):
+        return [cleaned(item) for item in value]
+    if isinstance(value, dict):
+        return {key: cleaned(item) for key, item in value.items()}
+    return value
+
+
+def save_result(**fields):
+    """reports/result.json, versioned. Only this run's own outcome: never the patch text (change.patch holds it
+    when it is safe), prompts, solver sessions, the issue discussion, history or credentials."""
+    record = {"schema_version": RESULT_VERSION, "outcome": None, "reason": "", "issue": None, "fix": None,
+              "report_file": None, "patch_file": None, "patch_withheld_reason": None, "notification": None} | fields
+    write_atomic(REPORTS / RESULT_FILE, json.dumps(cleaned(record), indent=2, ensure_ascii=False))
+
+
+def result_issue(state):
+    issue, policy, feasibility = state["issue"], state["issue"].get("policy", {}), state["issue"].get("feasibility", {})
+    return {"url": issue["html_url"], "repo": issue["repo"], "number": issue["number"], "title": issue["title"],
+            "labels": [label["name"] for label in issue.get("labels", [])], "repo_stars": feasibility.get("stars"),
+            "updated_at": issue.get("updated_at"), "body_excerpt": excerpt(issue.get("body") or "", 1200),
+            "work_type": issue.get("work_type", "code"), "language": issue.get("language", "python"),
+            "validation_plan": issue.get("validation_plan"), "why": state.get("why", ""), "score": score(issue),
+            "score_components": score_components(issue), "confidence": issue.get("selection_confidence"),
+            "ai_policy": {"status": policy.get("status"), "quote": policy.get("quote", "")},
+            "feasibility": feasibility.get("reason")}
+
+
+def result_fix(r):
+    brief = r["brief"]
+    plan = brief["validation"] if isinstance(brief.get("validation"), dict) else {}
+    cost = r.get("cost")
+    return {"provider": r.get("provider"), "fix_attempts": r.get("fix_attempts"),
+            "cost_estimate": cost if type(cost) in (int, float) else None,  # None means not reported, never free
+            "tests_passed": bool(r.get("passed")), "regression_reproduced": r.get("reproduces"),
+            "documentation_verified": bool(r.get("documentation_verified")), "runtime": plan.get("runtime"),
+            "setup_commands": plan.get("setup_commands", []), "test_commands": plan.get("test_commands", []),
+            "validation_log": r.get("log", ""), "regression_log": r.get("regression_log", ""),
+            **{key: brief.get(key) for key in BRIEF_FIELDS}}
+
+
+def run_result(state, body, patch, successful):
+    """The outcome of a run that picked an issue, from the same body and patch the email carries."""
+    r = state["result"]
+    # outbound() drops a patch only when something credential-shaped matched, and then says what.
+    withheld = body.rsplit("PATCH WITHHELD: ", 1)[-1] if redact(r.get("patch") or "") and not patch else None
+    if "error" in r:
+        outcome, reason = "no_fix", r["error"]
+    elif successful:
+        outcome, reason = "fix_verified", ("Documentation checks pass." if r.get("documentation_verified")
+                                           else "Tests pass, and the new test fails on the unfixed code.")
+    else:
+        outcome = "fix_not_verified"
+        reason = ("The patch was withheld: " + withheld if withheld
+                  else "The model made no changes." if not patch
+                  else ("The documentation checks failed." if state["issue"].get("work_type") == "documentation"
+                        else "The fix's tests failed.") if not r.get("passed")
+                  else "The new test didn't fail on the unfixed code, so the fix isn't proven.")
+    return {"outcome": outcome, "reason": reason, "issue": result_issue(state),
+            "fix": None if "error" in r else result_fix(r), "report_file": "report.txt",
+            "patch_file": "change.patch" if patch else None, "patch_withheld_reason": withheld}
+
+
+def finish(state):
+    """The graph's final state. A run that picked nothing still records why, rather than leaving no result."""
+    if "result" not in state:
+        save_result(outcome="no_pick", reason="No issue was picked: " + state.get("why", "no candidate was found"))
+
+
 def notify(state):
     msg, body, patch = compose(state)
     save_report(body, patch)
@@ -1202,9 +1283,11 @@ def notify(state):
     write_atomic(REPORTS / email_delivery.MESSAGE_FILE, msg.as_bytes())
     history = load_history()
     record, successful = attempt_record(state, patch, history)
+    result = run_result(state, body, patch, successful)
     # Record the attempt before sending: a crash mid-send must not look like an untried issue.
     history[state["issue"]["html_url"]] = record
     persist(history, record["notification"])
+    save_result(**result, notification=record["notification"])
 
     delivery = send_email(msg)
     record["notification"] = delivery          # record is the object inside history, so this updates both
@@ -1212,6 +1295,7 @@ def notify(state):
     if successful and delivery["status"] in {"sent", "disabled"}:
         record["status"] = "notified"
     persist(history, delivery)
+    save_result(**result, notification=delivery)
     email_delivery.annotate(delivery)
     if delivery["status"] == "failed":
         print("notify: email unavailable; report and patch preserved for download")
@@ -1241,4 +1325,4 @@ if __name__ == "__main__":
     email_delivery.check_configuration(PROFILE)
     for provider in (PICKER, SOLVER):
         model_providers.check_provider(provider)
-    build().invoke({})
+    finish(build().invoke({}))
